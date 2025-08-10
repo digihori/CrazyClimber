@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">ClimberClimber</string>
+
+    <string name="about_title">ClimberClimber</string>
+    <string name="about_message">
+        This game is a parody of the 1985 hit “Crazy Climber” and has been recreated for Android smartphones.\n
+        Features\n
+        - Hogehoge\n
+        - Game pad compatible\n
+        - Sound effects included\n
+    </string>
+    <string name="about_ok">OK</string>
+    <string name="about_hyperlink_name">Privacy Policy</string>
+    <string name="about_hyperlink">https://github.com/digihori/CrazyClimber/blob/main/PRIVACY.md</string>
+</resources>
