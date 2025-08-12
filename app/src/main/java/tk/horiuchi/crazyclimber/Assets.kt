@@ -27,6 +27,16 @@ object Assets {
 
     fun getPlayerBitmap(pose: PlayerPose): Bitmap? = playerBitmaps[pose]
 
+    fun getPlayerFootBitmap(pose: PlayerPose, ctx: Context): Bitmap? {
+        val name = when (pose) {
+            PlayerPose.LUP_RDOWN -> "player_lup_rdown_foot"
+            PlayerPose.LDOWN_RUP -> "player_ldown_rup_foot"
+            else -> return null
+        }
+        val id = ctx.resources.getIdentifier(name, "drawable", ctx.packageName)
+        return if (id != 0) BitmapFactory.decodeResource(ctx.resources, id) else null
+    }
+
     fun release() {
         playerBitmaps.values.forEach { it?.recycle() }
         playerBitmaps.clear()
