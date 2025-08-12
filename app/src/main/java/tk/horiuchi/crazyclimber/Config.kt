@@ -8,6 +8,8 @@ object Config {
     const val DT_MS = 1000 / FPS
     const val SIMUL_PRESS_WINDOW_MS = 200
 
-    const val WINDOW_BASE_MS = 1600
-    const val WINDOW_MIN_MS  = 700
+    const val WINDOW_BASE_MS = 2800L
+    const val WINDOW_MIN_MS  = 1200L
+    const val WINDOW_FLOOR_COEF = 4L     // 階が上がるごとの加速（小さめ）
+    const val WINDOW_JITTER_MS  = 900L   // ランダム揺らぎ
 }

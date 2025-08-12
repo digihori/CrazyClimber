@@ -1,10 +1,18 @@
 package tk.horiuchi.crazyclimber.core
 
 import android.util.Log
+import tk.horiuchi.crazyclimber.core.Config.WINDOW_BASE_MS
+import tk.horiuchi.crazyclimber.core.Config.WINDOW_FLOOR_COEF
+import tk.horiuchi.crazyclimber.core.Config.WINDOW_JITTER_MS
+import tk.horiuchi.crazyclimber.core.Config.WINDOW_MIN_MS
 import kotlin.math.max
 import kotlin.random.Random
 
 class World {
+    // ===== Debug flags =====
+    @Volatile var debugNoOjisan: Boolean = false
+    @Volatile var debugWindowsNeverClose: Boolean = true
+    var windowSpeedScale = 1.0f
 
     private val rnd = Random(0xCC1122)
     val player = Player()
@@ -30,6 +38,11 @@ class World {
 
     // クールダウン
     private var ojisanCooldownMs = 0L
+
+    // 横移動のクールタイム（repeat抑制）
+    private val SHIFT_COOLDOWN_MS = 220L       // ← GameViewのshiftMsと同じに
+    private var nextShiftOkMs = 0L             // 次に横移動を許可する時刻（ms）
+
 
     init {
         // 適当に初期化
@@ -169,27 +182,8 @@ class World {
                     }
                     lastUnstable = imposed
                 }
-
-                /*
-                val imposed = if (rnd.nextBoolean()) {
-                    player.hands = HandPair.L_UP_R_DOWN
-                    player.pose  = PlayerPose.LUP_RDOWN
-                    UnstablePattern.LUP_RDOWN
-                } else {
-                    player.hands = HandPair.L_DOWN_R_UP
-                    player.pose  = PlayerPose.LDOWN_RUP
-                    UnstablePattern.LDOWN_RUP
-                }
-                // ★被弾直後を“半歩目”として記録：次に反対を入れれば+1階
-                lastUnstable = imposed
-                
-                 */
             }
             Stability.UNSTABLE -> {
-                //player.fall()
-                //val cp = (player.pos.floor / 10) * 10
-                //player.pos = Cell(player.pos.col, cp)
-                // シーケンスはリセット
                 notifyHit()
                 lastUnstable = null
             }
@@ -198,6 +192,8 @@ class World {
 
     /** 上方の OPEN 窓から1体スポーン */
     private fun trySpawnOjisan() {
+        if (debugNoOjisan) return
+
         val f0 = player.pos.floor + 2
         val f1 = (player.pos.floor + 4).coerceAtMost(Config.FLOORS - 1)
         if (f0 > f1) return
@@ -219,10 +215,51 @@ class World {
 
 
     private fun updateWindows() {
+        if (debugWindowsNeverClose) {
+            // 全部開けっぱなしにして終了
+            for (f in 0 until Config.FLOORS)
+                for (c in 0 until Config.COLS)
+                    windows[f][c] = WindowState.OPEN
+            return
+        }
+
+        for (f in 0 until Config.FLOORS) {
+            for (c in 0 until Config.COLS) {
+
+                // ★ ここで毎フレーム OPEN に戻すような処理は入れないこと！
+
+                if (currentTimeMs >= nextTick[f][c]) {
+                    // 次の状態へ遷移
+                    windows[f][c] = when (windows[f][c]) {
+                        WindowState.OPEN   -> WindowState.HALF
+                        WindowState.HALF   -> WindowState.CLOSED
+                        WindowState.CLOSED -> WindowState.OPEN
+                    }
+
+                    // 次の切替時刻を計算（下限を設けてフラッシュ防止）
+                    val base = max(WINDOW_MIN_MS, WINDOW_BASE_MS - f * WINDOW_FLOOR_COEF)
+                    val jitter = rnd.nextLong(WINDOW_JITTER_MS)
+                    val dur = ((base + jitter) * windowSpeedScale).toLong()
+                    nextTick[f][c] = currentTimeMs + max(200L, dur) // 最低200msは保証
+                }
+            }
+        }
+
+        // 掴んでいる窓が閉まったら落下（演出はGameView側に寄せたいなら notifyHit() に統一も可）
+        if (mustFallByWindow()) {
+            player.fall()
+            val cpFloor = (player.pos.floor / 10) * 10
+            player.pos = Cell(player.pos.col, cpFloor)
+            windows[player.pos.floor][player.pos.col] = WindowState.OPEN
+            lastUnstable = null
+        }
+
+
+        /*
         for (f in 0 until Config.FLOORS) {
             for (c in 0 until Config.COLS) {
                 windows[f][c] = WindowState.OPEN
-                /*
+
                 if (currentTimeMs >= nextTick[f][c]) {
                     windows[f][c] = when (windows[f][c]) {
                         WindowState.OPEN -> WindowState.HALF
@@ -231,12 +268,10 @@ class World {
                     }
                     val base = max(
                         Config.WINDOW_MIN_MS.toLong(),
-                        Config.WINDOW_BASE_MS.toLong() - f * 12L
+                        Config.WINDOW_BASE_MS.toLong() - f * 4L
                     )
-                    nextTick[f][c] = currentTimeMs + base + rnd.nextLong(400)
+                    nextTick[f][c] = currentTimeMs + base + rnd.nextLong(900)
                 }
-
-                 */
             }
         }
         // 掴んでいる窓が閉まったら即落下
@@ -249,6 +284,8 @@ class World {
             windows[player.pos.floor][player.pos.col] = WindowState.OPEN
             lastUnstable = null
         }
+
+         */
 
     }
 
@@ -354,9 +391,10 @@ class World {
             // ここではポーズを変えず、横移動だけ判定可能にする
             val dir = shiftLatch.feed(left, right, nowMs)
             if (dir == LeverDir.LEFT || dir == LeverDir.RIGHT) {
-                val dx = if (dir == LeverDir.LEFT) -1 else 1
-                val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
-                if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
+                tryShiftDir(dir)
+                //val dx = if (dir == LeverDir.LEFT) -1 else 1
+                //val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
+                //if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
             }
             return
         }
@@ -406,9 +444,10 @@ class World {
         if (player.hands == HandPair.BOTH_UP || player.hands == HandPair.BOTH_DOWN) {
             val dir = shiftLatch.feed(left, right, nowMs)
             if (dir == LeverDir.LEFT || dir == LeverDir.RIGHT) {
-                val dx = if (dir == LeverDir.LEFT) -1 else 1
-                val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
-                if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
+                tryShiftDir(dir)
+                //val dx = if (dir == LeverDir.LEFT) -1 else 1
+                //val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
+                //if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
             }
         } else {
             shiftLatch.reset()
@@ -416,6 +455,7 @@ class World {
     }
 
 
+    /*
     // プレイヤーの見た目ポーズを更新する処理の例
     fun updatePlayerPose(left: LeverDir, right: LeverDir) {
         // レバーが両方 CENTER の場合はポーズ変更なし
@@ -440,19 +480,37 @@ class World {
         }
     }
 
+     */
+
+    /*
     private fun poseToUnstable(pose: PlayerPose): UnstablePattern = when (pose) {
         PlayerPose.LUP_RDOWN -> UnstablePattern.LUP_RDOWN  // ＞
         PlayerPose.LDOWN_RUP -> UnstablePattern.LDOWN_RUP  // ＜
         else -> UnstablePattern.NONE                       // ▽ / △ は安定
     }
 
+     */
+
+    /*
     private fun unstableOrNull(left: LeverDir, right: LeverDir): UnstablePattern? = when {
         left == LeverDir.UP   && right == LeverDir.DOWN -> UnstablePattern.LUP_RDOWN // ＞
         left == LeverDir.DOWN && right == LeverDir.UP   -> UnstablePattern.LDOWN_RUP // ＜
         else -> null
     }
 
-    // World.kt のどこか
+     */
+
+    private fun tryShiftDir(dir: LeverDir) {
+        if (currentTimeMs < nextShiftOkMs) return  // ★クールタイム中は無視
+
+        val dx = if (dir == LeverDir.LEFT) -1 else +1
+        val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
+        if (getWindow(next) != WindowState.CLOSED) {
+            player.shift(dx)
+            nextShiftOkMs = currentTimeMs + SHIFT_COOLDOWN_MS  // ★次回許可時刻を更新
+        }
+    }
+
     private var hitFlag = false
     fun notifyHit() { hitFlag = true } // 既存の当たり判定で呼ぶ
     fun consumeHitFlag(): Boolean {

@@ -79,6 +79,18 @@ class GameView(context: Context, attrs: AttributeSet?) :
     private var reverseScrollOffsetPx = 0f    // 背景群にだけ適用する下向きスクロール量
     private var reverseFloorsPerSec = 10f      // ★ 追加：逆スクロール速度（階/秒）。4〜8で調整
 
+    // ▼ 既存フィールド群の近くに追加
+    private var dropT = 1f                 // 0→1（1で非アニメ）
+    private val dropMs = 180L              // 降下アニメ時間（お好みで150〜220ms）
+    private var dropFromFloor = 0
+    private var dropToFloor   = 0
+
+    // ===== GAME OVER 演出 =====
+    private var goCooldownMs = 0L            // クールタイム（ms）
+    private var goBlinkMs = 0L               // 点滅タイマ
+    private var goBlinkOn = true             // 表示/非表示トグル
+    private val goBlinkIntervalMs = 500L     // 点滅間隔（お好みで）
+
     init {
         holder.addCallback(this)
         isFocusable = true
@@ -139,6 +151,16 @@ class GameView(context: Context, attrs: AttributeSet?) :
                     // 非PLAYINGでは足バタは進めない（任意：進めても悪さはしない）
                 }
 
+                if (phase == GamePhase.PLAYING && dropT >= 1f) {
+                    val p = world.player.pos
+                    // World側で BOTH_DOWN 被弾時に floor を 1 下げている前提
+                    if (p.floor < prevFloor) {
+                        dropFromFloor = prevFloor
+                        dropToFloor   = p.floor           // たぶん prevFloor-1
+                        dropT = 0f                        // 降下アニメ開始
+                    }
+                }
+
                 // ---- 差分検出（PLAYING時のみ） ----
                 if (phase == GamePhase.PLAYING) {
                     val p = world.player.pos
@@ -170,6 +192,15 @@ class GameView(context: Context, attrs: AttributeSet?) :
                         if (climbT >= 1f) {
                             prevFloor = climbToFloor
                             if (prevFloor > highestFloor) highestFloor = prevFloor // ★チェックポイント更新
+                        }
+                    }
+
+                    // ▼ 既存の shift/climb 進行に続けて
+                    if (dropT < 1f) {
+                        dropT = (dropT + dtMs / dropMs.toFloat()).coerceAtMost(1f)
+                        if (dropT >= 1f) {
+                            // ここでようやく prevFloor を“1段下がった”値に確定
+                            prevFloor = dropToFloor
                         }
                     }
                 }
@@ -207,9 +238,35 @@ class GameView(context: Context, attrs: AttributeSet?) :
                     if (playerShakeMs < 0L) playerShakeMs = 0L
                 }
 
+                // ===== GAME OVER 中の点滅・クールタイム更新 =====
+                if (phase == GamePhase.GAME_OVER) {
+                    if (goCooldownMs > 0L) {
+                        // クールタイム中だけ点滅
+                        goBlinkMs += dtMs
+                        if (goBlinkMs >= goBlinkIntervalMs) {
+                            goBlinkMs = 0L
+                            goBlinkOn = !goBlinkOn
+                        }
+                        goCooldownMs -= dtMs
+                        if (goCooldownMs < 0L) goCooldownMs = 0L
+                    } else {
+                        // 3秒経過後は常時点灯＆点滅停止
+                        goBlinkOn = true
+                    }
+                }
+
                 drawFrame()
-                onHudUpdate?.invoke(world.player.score, world.player.lives, world.player.pos.floor)
+                post {
+                    onHudUpdate?.invoke(world.player.score, world.player.lives, world.player.pos.floor)
+                }
                 last = now
+
+                // 再スタートのトリガはここで拾う
+                if (phase == GamePhase.GAME_OVER && goCooldownMs <= 0L) {
+                    if (lastLeft != LeverDir.CENTER || lastRight != LeverDir.CENTER) {
+                        restartGame()
+                    }
+                }
             } else {
                 try { Thread.sleep(2) } catch (_: InterruptedException) {}
             }
@@ -244,6 +301,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
         world.player.lives -= 1
         if (world.player.lives <= 0) {
             phase = GamePhase.GAME_OVER
+            goCooldownMs = 3000L      // ★ 3秒クールタイム開始
+            goBlinkMs = 0L
+            goBlinkOn = true
             return
         }
 
@@ -313,11 +373,15 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val maxTop = (Config.FLOORS - visibleRows).coerceAtLeast(0)
             val desiredTop = (world.player.pos.floor - targetFromBottom).coerceIn(0, maxTop)
             val animatingClimb = climbT < 1f
-            val cameraTop = if (animatingClimb)
-                (climbFromFloor - targetFromBottom).coerceIn(0, maxTop)
-            else
-                desiredTop
-            camTopFloor = cameraTop
+            val animatingDrop  = dropT  < 1f
+            val cameraTopBase =
+                if (animatingClimb)
+                    (climbFromFloor - targetFromBottom).coerceIn(0, maxTop)
+                else if (animatingDrop)
+                    (dropFromFloor  - targetFromBottom).coerceIn(0, maxTop)
+                else
+                    desiredTop
+            camTopFloor = cameraTopBase
 
             // ========= 補間量算出 =========
             //val k = easeOutCubic(climbT)
@@ -327,9 +391,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val drawColF = shiftFromCol * (1f - s) + shiftToCol * s
 
 
-// ここまでに cameraTop, climbT, tileW/tileH/visibleRows はある前提
+            // ここまでに cameraTop, climbT, tileW/tileH/visibleRows はある前提
 
-// ★ 逆スクロールを行数と端数pxに分解
+            // ★ 逆スクロールを行数と端数pxに分解
             val revRows = if (phase == GamePhase.FALL_SEQUENCE)
                 (reverseScrollOffsetPx / tileH).toInt()
             else 0
@@ -338,16 +402,24 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 (reverseScrollOffsetPx - revRows * tileH)
             else 0f
 
-// ★ 有効カメラ：下に revRows 階ぶんズラす（＝建物が下へ流れて見える）
+            // ★ 有効カメラ：下に revRows 階ぶんズラす（＝建物が下へ流れて見える）
             //val maxTop = (Config.FLOORS - visibleRows).coerceAtLeast(0)
-            val cameraTopEffective = (cameraTop + revRows).coerceIn(0, maxTop)
+            val cameraTopEffective = (cameraTopBase + revRows).coerceIn(0, maxTop)
 
             // ★ 背景の縦オフセット：元の climbOffsetPx から“端数px”を引く
-            fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
-            val k = easeOutCubic(climbT)
-            val climbOffsetPxBase = if (climbT < 1f) k * tileH else 0f
-            val climbOffsetPx = climbOffsetPxBase - revPx
+            //fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
+            //val k = easeOutCubic(climbT)
+            //val climbOffsetPxBase = if (climbT < 1f) k * tileH else 0f
+            //val climbOffsetPx = climbOffsetPxBase - revPx
 
+            fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
+            val kUp = easeOutCubic(climbT)
+            val climbOffsetPxBase = if (animatingClimb) kUp * tileH else 0f
+            val kDown = easeOutCubic(dropT)
+            val dropOffsetPx = if (animatingDrop) (-kDown * tileH) else 0f  // ★ 降下は“上方向”に1段ぶん移動
+
+// 最終オフセット（逆スクロール分の端数は従来どおり引く）
+            val climbOffsetPx = climbOffsetPxBase + dropOffsetPx - revPx
 
 
             // ========= 逆スクロール適用ブロック（背景・障害物のみ） =========
@@ -589,8 +661,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 }
             }
 
-            // TODO: GAME OVER 表示を出したい場合はここで描画する
-            // if (phase == GamePhase.GAME_OVER) { ... }
+            if (phase == GamePhase.GAME_OVER) {
+                drawGameOver(canvas)
+            }
 
         } finally {
             holder.unlockCanvasAndPost(canvas)
@@ -631,7 +704,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
     // ====== 入力（GAME OVER → リスタート） ======
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (phase == GamePhase.GAME_OVER && event.action == MotionEvent.ACTION_DOWN) {
-            restartGame()
+            if (goCooldownMs <= 0L) {
+                restartGame()
+            }
             return true
         }
         return super.onTouchEvent(event)
@@ -639,7 +714,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (phase == GamePhase.GAME_OVER) {
-            restartGame()
+            if (goCooldownMs <= 0L) {
+                restartGame()
+            }
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -650,6 +727,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
         reverseScrollOffsetPx = 0f
         fallTimer = 0f
         playerAlpha = 1f
+        goCooldownMs = 0L
 
         // prevの初期化
         prevCol   = world.player.pos.col
@@ -665,4 +743,20 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
         phase = GamePhase.PLAYING
     }
+
+    private fun drawGameOver(canvas: Canvas) {
+        if (!goBlinkOn) return  // ★ 点滅OFFのフレームは描かない
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            textSize = (width * 0.16f).coerceAtLeast(56f)
+            setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        val cx = width / 2f
+        val cy = height / 2f
+        canvas.drawText("GAME OVER", cx, cy, paint)
+    }
+
 }
