@@ -140,6 +140,37 @@ class World {
         player.hit(true)
         when (player.stability) {
             Stability.STABLE -> {
+                if (player.hands == HandPair.BOTH_DOWN) {
+                    // ★ 1段下げる（下限0でクランプ）
+                    val newFloor = (player.pos.floor - 1).coerceAtLeast(0)
+                    player.pos = player.pos.copy(floor = newFloor)
+
+                    // ★ 強制UNSTABLE（ランダムで ＞ / ＜ を付与）
+                    val imposed = if (rnd.nextBoolean()) {
+                        player.hands = HandPair.L_UP_R_DOWN
+                        player.pose  = PlayerPose.LUP_RDOWN
+                        UnstablePattern.LUP_RDOWN
+                    } else {
+                        player.hands = HandPair.L_DOWN_R_UP
+                        player.pose  = PlayerPose.LDOWN_RUP
+                        UnstablePattern.LDOWN_RUP
+                    }
+                    lastUnstable = imposed
+                } else {
+                    // （BOTH_UP など）従来通り：高さは据え置きでUNSTABLE化
+                    val imposed = if (rnd.nextBoolean()) {
+                        player.hands = HandPair.L_UP_R_DOWN
+                        player.pose  = PlayerPose.LUP_RDOWN
+                        UnstablePattern.LUP_RDOWN
+                    } else {
+                        player.hands = HandPair.L_DOWN_R_UP
+                        player.pose  = PlayerPose.LDOWN_RUP
+                        UnstablePattern.LDOWN_RUP
+                    }
+                    lastUnstable = imposed
+                }
+
+                /*
                 val imposed = if (rnd.nextBoolean()) {
                     player.hands = HandPair.L_UP_R_DOWN
                     player.pose  = PlayerPose.LUP_RDOWN
@@ -151,12 +182,15 @@ class World {
                 }
                 // ★被弾直後を“半歩目”として記録：次に反対を入れれば+1階
                 lastUnstable = imposed
+                
+                 */
             }
             Stability.UNSTABLE -> {
-                player.fall()
-                val cp = (player.pos.floor / 10) * 10
-                player.pos = Cell(player.pos.col, cp)
+                //player.fall()
+                //val cp = (player.pos.floor / 10) * 10
+                //player.pos = Cell(player.pos.col, cp)
                 // シーケンスはリセット
+                notifyHit()
                 lastUnstable = null
             }
         }
@@ -207,7 +241,8 @@ class World {
         }
         // 掴んでいる窓が閉まったら即落下
         if (mustFallByWindow()) {
-            player.fall()
+            //player.fall()
+            notifyHit()
             val cpFloor = (player.pos.floor / 10) * 10
             player.pos = Cell(player.pos.col, cpFloor)
             // 安全化
@@ -417,5 +452,52 @@ class World {
         else -> null
     }
 
+    // World.kt のどこか
+    private var hitFlag = false
+    fun notifyHit() { hitFlag = true } // 既存の当たり判定で呼ぶ
+    fun consumeHitFlag(): Boolean {
+        val v = hitFlag
+        hitFlag = false
+        return v
+    }
+
+    fun clearObjectsForFall() {
+        pots.clear()
+        ojisans.clear()
+    }
+
+    fun reset() {
+        // プレイヤー初期化
+        player.pos = Cell(Config.COLS / 2, 1) // 中央列、1階
+        player.lives = 3
+        player.score = 0
+        player.pose = PlayerPose.BOTH_UP
+        player.hands  = HandPair.BOTH_UP
+
+        // 内部状態
+        lastUnstable = null
+        lastPoseUnstable = UnstablePattern.NONE
+
+        // 障害物・敵をリセット
+        pots.clear()
+        ojisans.clear()
+
+        // 窓の初期状態リセット
+        //for (y in 0 until Config.FLOORS) {
+            //for (x in 0 until Config.COLS) {
+                //setWindow(Cell(x, y), WindowState.CLOSED)
+            //}
+        //}
+
+        // フラグ・タイマーのリセット
+        hitFlag = false
+        //gameTimer = 0L
+        //spawnTimer = 0L
+        currentTimeMs = 0L
+        nextOjisanCheckMs = 0L
+        ojisanCooldownMs = 0L
+        safeUntilMs = 3000L
+        hitFlag = false
+    }
 
 }
