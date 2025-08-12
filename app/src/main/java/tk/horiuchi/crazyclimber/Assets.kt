@@ -7,6 +7,8 @@ import tk.horiuchi.crazyclimber.core.PlayerPose
 
 object Assets {
     private val playerBitmaps = mutableMapOf<PlayerPose, Bitmap?>()
+    private var ojisan: Bitmap? = null
+    private var pot: Bitmap? = null
     private var inited = false
 
     // 画像ファイル名（拡張子なし・res/drawable/ に置く）
@@ -22,6 +24,8 @@ object Assets {
         poseNames.forEach { (pose, name) ->
             playerBitmaps[pose] = loadIfExists(context, name)
         }
+        ojisan = loadIfExists(context, "ojisan")
+        pot    = loadIfExists(context, "pot")
         inited = true
     }
 
@@ -37,9 +41,14 @@ object Assets {
         return if (id != 0) BitmapFactory.decodeResource(ctx.resources, id) else null
     }
 
+    fun getOjisanBitmap(): Bitmap? = ojisan
+    fun getPotBitmap(): Bitmap? = pot
+
     fun release() {
         playerBitmaps.values.forEach { it?.recycle() }
         playerBitmaps.clear()
+        ojisan?.recycle(); ojisan = null
+        pot?.recycle();    pot = null
         inited = false
     }
 

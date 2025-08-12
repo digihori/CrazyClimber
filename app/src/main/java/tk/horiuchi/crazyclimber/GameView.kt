@@ -3,6 +3,7 @@ package tk.horiuchi.crazyclimber.ui.view
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
+import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import tk.horiuchi.crazyclimber.core.*
@@ -48,6 +49,15 @@ class GameView(context: Context, attrs: AttributeSet?) :
     private var prevCol   = 0
     private var prevFloor = 0
 
+    // 被弾の震え演出
+    private var playerShakeMs: Long = 0L
+    private val playerShakeTotal: Long = 180L
+
+    // 簡易落下演出（背景を一気に下へ流す）
+    private var fallingFxT = 1f    // 0→1
+    private val fallingMs = 350L
+
+
     init { holder.addCallback(this) }
 
     // ===== ライフサイクル =====
@@ -66,7 +76,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
     }
 
     // ===== メインループ =====
-// 足バタ演出
+    // 足バタ演出
     private var lastPose: PlayerPose = PlayerPose.BOTH_DOWN
     private var footFxT = 1f                 // 0→1、1で非表示
     private val footFxMs = 200L              // 1コマ〜100ms程度
@@ -130,6 +140,21 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 drawFrame()
                 onHudUpdate?.invoke(world.player.score, world.player.lives, world.player.pos.floor)
 
+                // World 側の状態に応じて演出起動
+                // （安定→片手に崩れた “直後” を検知するには、World からフラグを渡すのが一番だが、
+                //  まずは鉢ヒット時に playerShakeMs をセットするために onPlayerHitByPot 内で
+                //  画面側へ通知できないので、当面はここで簡易に：）
+                if (playerShakeMs > 0L) {
+                    playerShakeMs -= dt
+                    if (playerShakeMs < 0L) playerShakeMs = 0L
+                }
+
+                // 落下中の簡易スクロール
+                if (fallingFxT < 1f) {
+                    fallingFxT = (fallingFxT + dt / fallingMs.toFloat()).coerceAtMost(1f)
+                }
+
+
                 last = now
             } else {
                 try { Thread.sleep(2) } catch (_: InterruptedException) {}
@@ -138,7 +163,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
     }
 
     // イージング（必要に応じて差し替え）
-    private fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
+    //private fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
 
     // ===== 描画 =====
     private fun drawFrame() {
@@ -153,9 +178,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
             // ========= 配色（画像の雰囲気に合わせたサンプル） =========
             val facadeColor  = Color.rgb(255, 248, 170) // 外壁クリーム
             val mullionColor = Color.rgb(150,   0,   0) // 赤い縦柱
-            val winOpen      = Color.rgb( 58, 220, 255) // 開：明るい水色
+            val winOpen      = Color.rgb(  6,   8,  12) // 閉：黒
+            val winClosed    = Color.rgb( 58, 220, 255) // 開：明るい水色
             val winHalf      = Color.rgb( 30,  80, 120) // 半開
-            val winClosed    = Color.rgb(  6,   8,  12) // 閉：黒
 
             // ========= 3列フロア判定＆描画補助（ローカル関数） =========
             fun isThreeColFloor(floor: Int): Boolean {
@@ -264,9 +289,110 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 drawSidePanelsIfNeeded(c, floor, top.toFloat(), tileH)
             }
 
+
+            // ===== おじさん描画 =====
+            // ===== おじさん描画（DONEは非表示、窓内クリップ、下辺ベース） =====
+            run {
+                val bmp = Assets.getOjisanBitmap()
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY }
+
+                val windowScale = 0.7f                 // ← 窓と同じ値に合わせる
+                val winW = tileW * windowScale
+                val winH = tileH * windowScale
+                val offX = (tileW - winW) / 2f
+                val offY = (tileH - winH) / 2f
+
+                for (o in world.ojisans) {
+                    if (o.state == Ojisan.State.DONE) continue   // ★ DONE は描かない
+
+                    val r = (o.floor - cameraTop)
+                    if (r !in 0 until visibleRows) continue
+
+                    val tileLeft = o.col * tileW.toFloat()
+                    val tileTop  = height - (r + 1) * tileH + climbOffsetPx
+
+                    val winLeft   = tileLeft + offX
+                    val winTop    = tileTop  + offY
+                    val winRight  = winLeft  + winW
+                    val winBottom = winTop   + winH
+                    val cx = (winLeft + winRight) * 0.5f
+
+                    // 少し大きく見せる（係数は好みで）
+                    val boxW = winW * 0.90f
+                    val boxH = winH * 0.86f
+
+                    val (w, h) = if (bmp != null) {
+                        val s = minOf(boxW / bmp.width, boxH / bmp.height)
+                        bmp.width * s to bmp.height * s
+                    } else {
+                        boxW to boxH
+                    }
+
+                    val t = o.t.coerceIn(0f, 1f)
+                    val eased = 1f - (1f - t) * (1f - t) * (1f - t)  // easeOutCubic
+
+                    // 状態ごとの yBottom（下辺基準）。else は作らない（＝描かない）
+                    val yBottom = when (o.state) {
+                        Ojisan.State.SLIDE_IN  -> winBottom + h * (1f - eased)  // 下→上へ
+                        Ojisan.State.THROW     -> winBottom                      // 下辺に揃える
+                        Ojisan.State.SLIDE_OUT -> winBottom + h * eased          // 上→下へ
+                        Ojisan.State.DONE      -> Float.NaN                      // ここには来ないが保険
+                    }
+                    if (yBottom.isNaN()) continue
+                    val yTop = yBottom - h
+
+                    // 完全に窓外なら描かない（境界にじみ対策）
+                    if (yBottom <= winTop || yTop >= winBottom) continue
+
+                    // クリップの下端を少しだけ内側にして境界ラインを切る
+                    val clipBottom = winBottom - 0.5f
+
+                    c.save()
+                    c.clipRect(winLeft, winTop, winRight, clipBottom)
+
+                    if (bmp != null) {
+                        paint.isFilterBitmap = false
+                        val src = Rect(0, 0, bmp.width, bmp.height)
+                        val dst = RectF(cx - w / 2f, yTop, cx + w / 2f, yBottom)
+                        c.drawBitmap(bmp, src, dst, paint)
+                    } else {
+                        c.drawRect(cx - w / 2f, yTop, cx + w / 2f, yBottom, paint)
+                    }
+
+                    c.restore()
+                }
+            }
+
+
+            // ===== 植木鉢描画 =====
+            run {
+                val bmp = Assets.getPotBitmap()
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(120, 60, 30) } // フォールバック
+                for (pot in world.pots) {
+                    val r = (pot.yFloor - cameraTop)
+                    val top = height - ((r + 1f) * tileH) + climbOffsetPx
+                    val left = pot.col * tileW.toFloat()
+                    val cx = left + tileW * 0.5f
+
+                    if (bmp != null) {
+                        val box = tileW * 0.8f // 鉢の見かけサイズ
+                        val scale = minOf(box / bmp.width, box / bmp.height)
+                        val w = bmp.width * scale
+                        val h = bmp.height * scale
+                        p.isFilterBitmap = false
+                        val src = Rect(0, 0, bmp.width, bmp.height)
+                        val dst = RectF(cx - w/2f, top, cx + w/2f, top + h)
+                        c.drawBitmap(bmp, src, dst, p)
+                    } else {
+                        val size = tileW * 0.35f
+                        c.drawRect(cx - size/2f, top, cx + size/2f, top + size, p)
+                    }
+                }
+            }
+
+
             // ========= プレイヤー（下から2段目固定／横だけ補間） =========
             val pose = world.player.pose
-            //val bmp  = tk.horiuchi.crazyclimber.ui.assets.Assets.getPlayerBitmap(pose)
 
             // 足バタを使うか？
             val useFoot = (pose == PlayerPose.LUP_RDOWN || pose == PlayerPose.LDOWN_RUP) && footFxT < 1f
@@ -281,10 +407,6 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val fyFixed = 1
             val baseTop  = (height - (fyFixed + 1) * tileH).toFloat()
 
-            //val destLeft = drawColF * tileW
-            //val destTop  = baseTop
-            //val destRight  = destLeft + tileW
-            //val destBottom = destTop  + tileH
             val scale = 1.6f // 拡大率
 
             val destCenterX = drawColF * tileW + tileW / 2f
@@ -293,8 +415,17 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val halfW = tileW * scale / 2f
             val halfH = tileH * scale / 2f
 
-            val destLeft   = destCenterX - halfW
-            val destTop    = destCenterY - halfH
+            var shakeX = 0f
+            var shakeY = 0f
+            if (world.player.stability == Stability.STABLE && playerShakeMs > 0L) {
+                // 両手状態で被弾直後のビリビリ
+                val amp = 3f
+                shakeX = (-amp..amp).random()
+                shakeY = (-amp..amp).random()
+            }
+
+            val destLeft   = destCenterX - halfW + shakeX
+            val destTop    = destCenterY - halfH + shakeY
             val destRight  = destCenterX + halfW
             val destBottom = destCenterY + halfH
 
@@ -328,6 +459,10 @@ class GameView(context: Context, attrs: AttributeSet?) :
             holder.unlockCanvasAndPost(c)
         }
     }
+
+    fun ClosedFloatingPointRange<Float>.random() =
+        (start + Math.random().toFloat() * (endInclusive - start))
+
 
     // ===== SurfaceHolder.Callback =====
     override fun surfaceCreated(holder: SurfaceHolder) {
