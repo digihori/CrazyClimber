@@ -8,7 +8,7 @@ class World {
     // ===== Debug flags =====
     @Volatile var debugNoOjisan: Boolean = false
     @Volatile var debugWindowsNeverClose: Boolean = false
-    //var windowSpeedScale = 1.0f
+    @Volatile var debugShirakeLoop: Boolean = false
 
     private val rnd = Random(System.nanoTime())
     val player = Player()
@@ -105,12 +105,13 @@ class World {
             forceOpenAllWindows()
         } else {
             // 窓まわり
-            seedInitialClosedIfNeeded()  // ★初めて見えた階に20%閉を配る
+            seedInitialClosedIfNeeded()  // 初めて見えた階に20%閉を配る
             handleForceCloseByIdle()
             stepWindowAnimAndTrigger()
-            toggleSomeVisibleWindows()   // ★可視20%をトグル抽選
+            toggleSomeVisibleWindows()   // 可視20%をトグル抽選
         }
 
+        updateShirake(dtMs)
         updateOjisanAndPots(dtMs)
         // クリア条件（仮）：最上階に到達したら固定ボーナス
         if (player.pos.floor >= Config.FLOORS - 1) {
@@ -191,6 +192,10 @@ class World {
                 // 先にプレイヤー側の処理
                 onPlayerHitByPot(p)
 
+                if (p.kind == Pot.Kind.BIRD_DROP) {
+                    itP.remove()
+                    continue
+                }
                 // ★ 跳ね返り：衝突点を「1階上」にしてから横へ逃がす
                 if (!p.bounced) {
                     val BOUNCE_OFFSET_F = 1.0f      // ← “1段上”の量。好みに応じて 0.8〜1.2 に調整可
@@ -255,6 +260,7 @@ class World {
     /** 上方の OPEN 窓から1体スポーン */
     private fun trySpawnOjisan() {
         if (debugNoOjisan) return
+        if (shirake.active) return
 
         val f0 = player.pos.floor + 2
         val f1 = (player.pos.floor + 4).coerceAtMost(Config.FLOORS - 1)
@@ -279,6 +285,10 @@ class World {
     fun setVisibleRange(topFloor: Int, rows: Int) {
         visTopFloor = topFloor.coerceIn(0, Config.FLOORS - 1)
         visRows     = rows.coerceIn(0, Config.FLOORS)
+
+        if (!visReady && visRows > 0) {
+            visReady = true
+        }
     }
 
     // steps=3 のとき、OPEN=0、CLOSING1=0.25、CLOSING2=0.5、CLOSING3=0.75、CLOSED=1.0
@@ -330,7 +340,6 @@ class World {
     }
 
     // 同じ窓を連発で選ばないためのクールダウン
-    //private val CELL_COOLDOWN_MS = 4000L
     private val nextEligible = Array(Config.FLOORS) { Array(Config.COLS) { 0L } }
     private fun toggleSomeVisibleWindows() {
         if (visRows <= 0 || currentTimeMs < nextSelectMs) return
@@ -418,7 +427,7 @@ class World {
         return Cell(player.pos.col, needFloor.coerceAtMost(Config.FLOORS - 1))
     }
 
-    // ★追加：横移動のときに衝突判定へ使う窓
+    // 追加：横移動のときに衝突判定へ使う窓
     private fun destCellForHorizontal(dx: Int): Cell {
         val col = (player.pos.col + dx).coerceIn(0, Config.COLS - 1)
         val f   =
@@ -517,7 +526,7 @@ class World {
         val tgt = targetCellForFall()   // ★ここも統一
         val f = tgt.floor; val c = tgt.col
 
-        // ★ いきなり CLOSED にせず、「今の状態から」閉方向へスイッチ
+        // いきなり CLOSED にせず、「今の状態から」閉方向へスイッチ
         when (winAnim[f][c]) {
             // 安定OPEN／開きかけ → 閉じ始め（進捗に合わせた段へ）
             WindowAnim.OPEN,
@@ -551,10 +560,13 @@ class World {
         lastPosChangeMs = currentTimeMs + FORCE_CLOSE_IDLE_MS
     }
 
+    /*
     private fun isStable(left: LeverDir, right: LeverDir): Boolean =
         (left == LeverDir.UP && right == LeverDir.UP) ||
                 (left == LeverDir.DOWN && right == LeverDir.DOWN)
+     */
 
+    /*
     // Lever入力から行動を決定
     private fun climb(toPose: PlayerPose) {
         val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
@@ -568,6 +580,8 @@ class World {
             PlayerPose.LDOWN_RUP -> HandPair.L_DOWN_R_UP
         }
     }
+
+     */
 
     private fun applyPose(p: PlayerPose) {
         player.pose = p
@@ -718,6 +732,7 @@ class World {
     fun clearObjectsForFall() {
         pots.clear()
         ojisans.clear()
+        endShirakeNow()
     }
 
     fun reset() {
@@ -744,6 +759,12 @@ class World {
         // 障害物・敵をリセット
         pots.clear()
         ojisans.clear()
+        visReady = false
+        shirakePending = false
+        shirakeDone = false
+        shirake = Shirake()
+        shirakeDraw = null
+        hasShirakeDraw = false
 
         // フラグ・タイマーのリセット
         hitFlag = false
@@ -757,5 +778,215 @@ class World {
         windowSafeUntilMs  = 0L
         safeUntilMs = 3000L
     }
+
+
+    // ===== しらけどり =====
+    private data class Shirake(
+        var active: Boolean = false,
+        var dir: Int = +1,             // +1: L→R, -1: R→L
+        var t: Float = 0f,             // 0..1 の進行
+        var speed: Float = 0.23f,      // 1画面横断/秒 (0.23 → 約4.3秒で横断)
+        var ampFloors: Float = 0.6f,   // 上下振幅（“階”単位）
+        var phase: Float = 0f,         // ふらふら位相
+        var drop1T: Float = 0.25f,     // フンのタイミング（0..1）
+        var drop2T: Float = 0.75f,
+        var dropped1: Boolean = false,
+        var dropped2: Boolean = false,
+        var startPlayerFloor: Int = 0, // 10F上昇の終了判定用
+        var baseFloor: Float = 0f      // 画面上部の基準Y（“階”）
+    )
+    private var shirake = Shirake()
+    private var shirakeDone = false     // 1回限りにする用
+
+    // 置き換え：data class → 再利用する可変クラスに
+    class ShirakeDraw(var xFrac: Float = 0f, var yFloor: Float = 0f, var dir: Int = +1, var flap: Int = 0)
+    @Volatile private var shirakeDraw: ShirakeDraw? = null
+    private var hasShirakeDraw = false
+    fun getShirakeDraw(): ShirakeDraw? = shirakeDraw
+
+    // しらけどりのトリガと終了条件
+    private val SHIRAKE_TRIGGER_FLOOR = 20     // 到達で出現
+    private val SHIRAKE_ASCEND_TO_END = 10     // その後10F上昇で終了
+
+    // 可視範囲が一度でも設定されたか
+    @Volatile private var visReady = false
+    // 可視範囲未確定の間に出現条件を満たしたら保留
+    @Volatile private var shirakePending = false
+
+    // World.kt に追加
+    private fun topRowFloorSafe(): Float {
+        val vr = if (visRows > 0) visRows else 12  // フォールバック
+        return visTopFloor + vr - 1f
+    }
+
+    private fun startShirake() {
+        //val phase = rnd.nextFloat() * (Math.PI * 2).toFloat()
+        val phase = rnd.nextFloat() * Math.PI.toFloat()
+        // 0.2〜0.8 の範囲で2回、近すぎたら少し離す
+        var d1 = rnd.nextFloat() * 0.6f + 0.2f
+        var d2 = rnd.nextFloat() * 0.6f + 0.2f
+        if (kotlin.math.abs(d1 - d2) < 0.2f) {
+            if (d1 < d2) d2 = (d1 + 0.25f).coerceAtMost(0.95f) else d1 = (d2 + 0.25f).coerceAtMost(0.95f)
+        }
+
+        val amp = 0.8f
+        val topRowFloor = topRowFloorSafe()
+        val screenTop   = topRowFloor - 1f    // オーバースキャンぶん補正（実画面の上端付近）
+        val topMargin   = 0.15f               // 画面上端からの余白（お好みで 0.1〜0.3）
+        val ceiling     = screenTop - topMargin  // ← 鳥が上がれる“最大 yFloor”
+        shirake = Shirake(
+            active = true,
+            dir = +1,
+            t = 0f,
+            speed = 0.13f,
+            ampFloors = amp,
+            phase = phase,
+            drop1T = d1,
+            drop2T = d2,
+            dropped1 = false,
+            dropped2 = false,
+            startPlayerFloor = player.pos.floor,
+            baseFloor = ceiling - amp * 0.5f
+        )
+
+        // ★初期スナップショットを作っておく
+        val initY = (shirake.baseFloor + shirake.ampFloors * kotlin.math.sin(shirake.phase))
+            .coerceAtMost(ceiling)
+        shirakeDraw = ShirakeDraw(
+            xFrac = if (shirake.dir > 0) 0f else 1f,
+            yFloor = initY,
+            dir = shirake.dir,
+            flap = 0
+        )
+    }
+
+    private fun resetShirakePassForReverse() {
+        shirake.dir *= -1
+        shirake.t = 0f
+        shirake.dropped1 = false
+        shirake.dropped2 = false
+        shirake.phase = rnd.nextFloat() * (Math.PI * 2).toFloat()
+    }
+
+    private fun spawnBirdDrop(xFrac: Float, yFloor: Float) {
+        val col = (xFrac * Config.COLS).toInt().coerceIn(0, Config.COLS - 1)
+        val startFloor = (yFloor - 0.9f).coerceAtLeast(0f)
+        pots += Pot(
+            col = col,
+            //yFloor = yFloor + 0.4f,
+            yFloor = startFloor,
+            speedFloorsPerSec = 4.2f,        // 好みで調整（鉢より少し速め）
+            bounced = false,                  // 最初から跳ねない
+            kind = Pot.Kind.BIRD_DROP         // ★フンとして生成
+        )
+    }
+
+    private fun updateShirake(dtMs: Long) {
+        // 出現判定
+        if (debugShirakeLoop) {
+            if (!shirake.active && !shirakeDone && player.pos.floor % 10 == 0) {
+                if (visReady) {
+                    startShirake()
+                } else {
+                    shirakePending = true   // 可視行数が入るまで保留
+                }
+            } else {
+                if (player.pos.floor % 10 != 0) {
+                    shirakeDone = false
+                    hasShirakeDraw = false
+                }
+            }
+        } else {
+            if (!shirake.active && !shirakeDone && player.pos.floor >= SHIRAKE_TRIGGER_FLOOR) {
+                //startShirake()
+                if (visReady) {
+                    startShirake()
+                } else {
+                    shirakePending = true   // 可視行数が入るまで保留
+                }
+            }
+        }
+        // ★ 可視行数が確定した“次の update”で起動
+        if (shirakePending && visReady && !shirake.active && !shirakeDone) {
+            startShirake()
+            shirakePending = false
+        }
+        if (!shirake.active) { shirakeDraw = null; return }
+
+        // ★保険：nullならここで用意
+        val draw = shirakeDraw ?: ShirakeDraw().also { shirakeDraw = it }
+
+        // 画面上部追従。上下揺れがはみ出さないようにオフセット
+        val topRowFloor = topRowFloorSafe()
+        val screenTop   = topRowFloor - 1f    // オーバースキャンぶん補正（実画面の上端付近）
+        val topMargin   = 0.15f               // 画面上端からの余白（お好みで 0.1〜0.3）
+        val ceiling     = screenTop - topMargin  // ← 鳥が上がれる“最大 yFloor”
+        shirake.baseFloor = ceiling - shirake.ampFloors * 0.5f
+
+        val dt = dtMs / 1000f
+        shirake.t += shirake.speed * dt
+        val progress = shirake.t.coerceAtMost(1f)
+        val xFrac = if (shirake.dir > 0) progress else 1f - progress
+
+        val wobble = kotlin.math.sin((2f * Math.PI * (progress * 1.5f)).toFloat() + shirake.phase)
+        val yFloorRaw = shirake.baseFloor + shirake.ampFloors * wobble
+        val yFloor    = yFloorRaw.coerceAtMost(ceiling)
+
+        // フン2回
+        if (!shirake.dropped1 && progress >= shirake.drop1T) { spawnBirdDrop(xFrac, yFloor); shirake.dropped1 = true }
+        if (!shirake.dropped2 && progress >= shirake.drop2T) { spawnBirdDrop(xFrac, yFloor); shirake.dropped2 = true }
+
+        if (debugShirakeLoop) {
+            if (player.pos.floor >= shirake.startPlayerFloor + 5) {
+                shirake.active = false
+                shirakeDone = true
+                shirakeDraw = null
+                hasShirakeDraw = false
+                return
+            }
+        } else {
+            // 10F上昇したら即終了（上に消える仕様は簡易で即消し）
+            if (player.pos.floor >= shirake.startPlayerFloor + SHIRAKE_ASCEND_TO_END) {
+                shirake.active = false
+                shirakeDone = true
+                shirakeDraw = null
+                hasShirakeDraw = false
+                return
+            }
+        }
+
+        // 端まで到達で折返し or 終了
+        if (shirake.t >= 1f) {
+            if (shirake.dir > 0) {
+                resetShirakePassForReverse()   // R→L へ
+            } else {
+                shirake.active = false         // 往復完了
+                shirakeDone = true
+                shirakeDraw = null
+                hasShirakeDraw = false
+                return
+            }
+        }
+
+        // 描画用スナップショット
+        val flap = ((currentTimeMs / 480L) % 2).toInt()
+
+        // ★draw に書き込む（null安全演算子は使わない）
+        draw.xFrac = xFrac
+        draw.yFloor = yFloor
+        draw.dir = shirake.dir
+        draw.flap = flap
+
+    }
+
+    // World.kt
+    fun endShirakeNow() {
+        if (!shirake.active) return
+        shirake.active = false
+        shirakeDone = true
+        shirakeDraw = null
+        hasShirakeDraw = false
+    }
+
 
 }

@@ -20,5 +20,8 @@ data class Pot(
     var col: Int,
     var yFloor: Float,                  // 上から見て floor 値で落下（毎秒 fps 換算ではなく論理時間）
     var bounced: Boolean = false,       // 1回だけ横に逃がす
-    val speedFloorsPerSec: Float = 6.0f // 落下速度：1秒に6フロア分くらい
-)
+    val speedFloorsPerSec: Float = 6.0f, // 落下速度：1秒に6フロア分くらい
+    var kind: Kind = Kind.POT
+) {
+    enum class Kind { POT, BIRD_DROP }
+}

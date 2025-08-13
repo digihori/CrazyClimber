@@ -9,6 +9,8 @@ object Assets {
     private val playerBitmaps = mutableMapOf<PlayerPose, Bitmap?>()
     private var ojisan: Bitmap? = null
     private var pot: Bitmap? = null
+    private val shirake: Array<Bitmap?> = arrayOfNulls(2)
+    private var drop: Bitmap? = null
     private var inited = false
 
     // 画像ファイル名（拡張子なし・res/drawable/ に置く）
@@ -24,8 +26,11 @@ object Assets {
         poseNames.forEach { (pose, name) ->
             playerBitmaps[pose] = loadIfExists(context, name)
         }
-        ojisan = loadIfExists(context, "ojisan")
-        pot    = loadIfExists(context, "pot")
+        ojisan  = loadIfExists(context, "ojisan")
+        pot     = loadIfExists(context, "pot")
+        shirake[0] = loadIfExists(context, "shirake1")
+        shirake[1] = loadIfExists(context, "shirake2")
+        drop    = loadIfExists(context, "drop")
         inited = true
     }
 
@@ -43,6 +48,11 @@ object Assets {
 
     fun getOjisanBitmap(): Bitmap? = ojisan
     fun getPotBitmap(): Bitmap? = pot
+
+    fun getShirakeBitmap(frame: Int): Bitmap? {
+        return shirake[(frame and 1)]
+    }
+    fun getBirdDropBitmap(): Bitmap? = drop
 
     fun release() {
         playerBitmaps.values.forEach { it?.recycle() }

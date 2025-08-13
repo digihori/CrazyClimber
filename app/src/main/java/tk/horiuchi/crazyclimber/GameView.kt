@@ -218,8 +218,6 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
                     // slide完了後：ビル逆スクロール
                     if (fallTimer > slideOffDuration) {
-                        //val speedPxPerSec = height * 0.25f // 目安：画面高の0.25倍/秒
-                        //reverseScrollOffsetPx += speedPxPerSec * (dtMs / 1000f)
                         // ★ タイル高さ × 階/秒 = px/秒
                         val cols = Config.COLS
                         val tileW = width / cols
@@ -351,6 +349,11 @@ class GameView(context: Context, attrs: AttributeSet?) :
     // ====== イージング ======
     private fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
 
+    val shirakeScale = 2.2f
+    private var shirakeFrames: Array<Bitmap?> = arrayOfNulls(2) // 羽ばたき 0/1
+    private val shirakePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = false }
+    private val shirakeSrc = Rect()
+    private val shirakeDst = RectF()
     // ====== 描画 ======
     private fun drawFrame() {
         val canvas = holder.lockCanvas() ?: return
@@ -366,7 +369,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val mullionColor = Color.rgb(150,   0,   0) // 赤い縦柱
             val winOpen      = Color.rgb(  6,   8,  12) // 閉：黒
             val winClosed    = Color.rgb( 58, 220, 255) // 開：明るい水色
-            val winHalf      = Color.rgb( 30,  80, 120) // 半開
+            //val winHalf      = Color.rgb( 30,  80, 120) // 半開
 
             // ========= 背景クリア =========
             canvas.drawColor(facadeColor)
@@ -387,10 +390,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
             camTopFloor = cameraTopBase
 
             // ========= 補間量算出 =========
-            //val k = easeOutCubic(climbT)
-            //val climbOffsetPx = if (animatingClimb) k * tileH else 0f
-
-            val s = easeOutCubic(shiftT)
+            //val s = easeOutCubic(shiftT)
             //val drawColF = shiftFromCol * (1f - s) + shiftToCol * s
 
 
@@ -570,7 +570,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
             // 植木鉢
             if (phase != GamePhase.FALL_SEQUENCE) {
                 run {
-                    val bmp = Assets.getPotBitmap()
+                    val bmpPot  = Assets.getPotBitmap()
+                    val bmpDrop = Assets.getBirdDropBitmap()
+
                     val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(120, 60, 30) }
                     for (pot in world.pots) {
                         val r = (pot.yFloor - cameraTopEffective)
@@ -578,6 +580,8 @@ class GameView(context: Context, attrs: AttributeSet?) :
                         val left = pot.col * tileW.toFloat()
                         val cx = left + tileW * 0.5f
 
+                        val isBird = (pot.kind == Pot.Kind.BIRD_DROP)
+                        val bmp = if (isBird) bmpDrop else bmpPot
                         if (bmp != null) {
                             val box = tileW * 0.8f
                             val scale = minOf(box / bmp.width, box / bmp.height)
@@ -592,6 +596,50 @@ class GameView(context: Context, attrs: AttributeSet?) :
                             canvas.drawRect(cx - size / 2f, top, cx + size / 2f, top + size, p)
                         }
                     }
+                }
+            }
+
+            // ===== しらけどり描画 =====
+            run {
+                val sd = world.getShirakeDraw() ?: return@run
+                val bmp = shirakeFrames[sd.flap.coerceIn(0,1)] ?: return@run
+
+                val cols = Config.COLS
+                val tileW = width / cols
+                val tileH = tileW
+
+                // 背景補間（climbOffsetPx）を合わせたいなら加算
+                val r  = (sd.yFloor - camTopFloor)
+                val cy = height - ((r + 0.5f) * tileH) + 0f /* + climbOffsetPx してもOK */
+                val cx = sd.xFrac * width
+
+                // サイズ決め（タイル基準で拡大）
+                val baseW = tileW * 1.1f
+                val baseH = tileH * 0.9f
+                val boxW  = baseW * shirakeScale
+                val boxH  = baseH * shirakeScale
+                val s     = minOf(boxW / bmp.width, boxH / bmp.height)
+                val w     = bmp.width * s
+                val h     = bmp.height * s
+
+                val left   = cx - w / 2f
+                //val top    = (cy - h / 2f).coerceAtLeast(0f)
+                val top    = cy - h / 2f
+                val right  = cx + w / 2f
+                val bottom = top + h
+
+                shirakeSrc.set(0, 0, bmp.width, bmp.height)
+                shirakeDst.set(left, top, right, bottom)
+
+                // 向き：左向きなら左右反転して描画（画像を別に持たなくてもOK）
+                if (sd.dir < 0) {
+                    canvas.save()
+                    // cx を中心に左右反転
+                    canvas.scale(-1f, 1f, cx, cy)
+                    canvas.drawBitmap(bmp, shirakeSrc, shirakeDst, shirakePaint)
+                    canvas.restore()
+                } else {
+                    canvas.drawBitmap(bmp, shirakeSrc, shirakeDst, shirakePaint)
                 }
             }
 
@@ -688,6 +736,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
     override fun surfaceCreated(holder: SurfaceHolder) {
         Assets.init(context)
 
+        // しらけどりの2フレーム（なければ同じ画像を2回返す実装でOK）
+        shirakeFrames[0] = Assets.getShirakeBitmap(0)
+        shirakeFrames[1] = Assets.getShirakeBitmap(1)
         // 現在の論理位置で初期化
         prevCol   = world.player.pos.col
         prevFloor = world.player.pos.floor
