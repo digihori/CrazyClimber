@@ -95,6 +95,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
         holder.addCallback(this)
         isFocusable = true
         isFocusableInTouchMode = true
+        restartGame()
     }
 
     // ====== ライフサイクル ======
@@ -123,14 +124,15 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 val dtSec = dtMs / 1000f
                 // 入力＆ロジック：PLAYING のときだけ動かす
                 if (phase == GamePhase.PLAYING) {
-                    world.handleInput(lastLeft, lastRight)
                     world.update(dtMs)
+                    world.handleInput(lastLeft, lastRight)
                 }
 
                 // 被弾ワンショットを確認（不安定時のみ即落下）
                 if (phase == GamePhase.PLAYING) {
                     val wasHit = world.consumeHitFlag() // ← World側で実装（1フレームだけtrue）
-                    if (wasHit && world.player.stability == Stability.UNSTABLE) {
+                    if (wasHit /*&& world.player.stability == Stability.UNSTABLE*/) {
+                        // UNSTABLEはWorld側でpodの判定をしているのでここでは不要
                         startFallSequence()
                     }
                 }
@@ -308,9 +310,10 @@ class GameView(context: Context, attrs: AttributeSet?) :
         }
 
         // 復帰地点：最後に通過したチェックポイント（無ければ10F）
-        val respawnFloor = checkpoints.filter { it <= highestFloor }.maxOrNull() ?: 10
+        val respawnFloor = checkpoints.filter { it <= highestFloor }.maxOrNull() ?: 1
         placePlayerAtFloor(respawnFloor)
         resetCameraForRespawn(respawnFloor)
+        world.grantStartSafety(durationMs = 2000L, horizRange = 1, vertRange = 2)
 
         // 演出系を初期化
         playerAlpha = 1f
@@ -388,7 +391,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
             //val climbOffsetPx = if (animatingClimb) k * tileH else 0f
 
             val s = easeOutCubic(shiftT)
-            val drawColF = shiftFromCol * (1f - s) + shiftToCol * s
+            //val drawColF = shiftFromCol * (1f - s) + shiftToCol * s
 
 
             // ここまでに cameraTop, climbT, tileW/tileH/visibleRows はある前提
@@ -403,14 +406,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
             else 0f
 
             // ★ 有効カメラ：下に revRows 階ぶんズラす（＝建物が下へ流れて見える）
-            //val maxTop = (Config.FLOORS - visibleRows).coerceAtLeast(0)
             val cameraTopEffective = (cameraTopBase + revRows).coerceIn(0, maxTop)
-
-            // ★ 背景の縦オフセット：元の climbOffsetPx から“端数px”を引く
-            //fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
-            //val k = easeOutCubic(climbT)
-            //val climbOffsetPxBase = if (climbT < 1f) k * tileH else 0f
-            //val climbOffsetPx = climbOffsetPxBase - revPx
 
             fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
             val kUp = easeOutCubic(climbT)
@@ -418,16 +414,11 @@ class GameView(context: Context, attrs: AttributeSet?) :
             val kDown = easeOutCubic(dropT)
             val dropOffsetPx = if (animatingDrop) (-kDown * tileH) else 0f  // ★ 降下は“上方向”に1段ぶん移動
 
-// 最終オフセット（逆スクロール分の端数は従来どおり引く）
+            // 最終オフセット（逆スクロール分の端数は従来どおり引く）
             val climbOffsetPx = climbOffsetPxBase + dropOffsetPx - revPx
 
 
             // ========= 逆スクロール適用ブロック（背景・障害物のみ） =========
-            //canvas.save()
-            //if (phase == GamePhase.FALL_SEQUENCE) {
-            //    canvas.translate(0f, reverseScrollOffsetPx)
-            //}
-
             // 先に外観の縦柱
             run {
                 val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = mullionColor }
@@ -454,6 +445,8 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 canvas.drawRect(width - panelW, top, width.toFloat(), top + tileH, p) // 右
             }
 
+            world.setVisibleRange(cameraTopEffective, visibleRows)
+
             // 窓タイル（背景のみ縦補間）
             run {
                 val p = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -469,21 +462,41 @@ class GameView(context: Context, attrs: AttributeSet?) :
                     val top = (height - (r + 1) * tileH + climbOffsetPx)
 
                     for (col in 0 until cols) {
+
                         val left = col * tileW.toFloat()
-                        p.style = Paint.Style.FILL
-                        p.color = if (mask[col]) {
-                            when (world.getWindow(Cell(col, floor))) {
-                                WindowState.OPEN   -> winOpen
-                                WindowState.HALF   -> winHalf
-                                WindowState.CLOSED -> winClosed
-                            }
-                        } else {
-                            facadeColor
+
+                        if (!mask[col]) {
+                            // 非表示列は外壁色で埋める（従来どおり）
+                            p.style = Paint.Style.FILL
+                            p.color = facadeColor
+                            canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, top + offsetY + winH, p)
+                            continue
                         }
+
+                        // 1) 黒い窓枠（全域）
+                        p.style = Paint.Style.FILL
+                        p.color = winOpen /* 黒 */
                         canvas.drawRect(
-                            left + offsetX, top + offsetY,
-                            left + offsetX + winW, top + offsetY + winH, p
+                            left + offsetX,
+                            top + offsetY,
+                            left + offsetX + winW,
+                            top + offsetY + winH,
+                            p
                         )
+
+                        // 2) 水色パネルを上から progress 分だけ被せる
+                        val prog = world.getWindowCloseProgress(Cell(col, floor)) // 0.0 .. 1.0
+                        if (prog > 0f) {
+                            p.color = winClosed /* 明るい水色（= 閉）*/
+                            val panelBottom = top + offsetY + winH * prog
+                            canvas.drawRect(
+                                left + offsetX,
+                                top + offsetY,
+                                left + offsetX + winW,
+                                panelBottom,
+                                p
+                            )
+                        }
                     }
                     drawSidePanelsIfNeeded(canvas, floor, top.toFloat(), tileH)
                 }
@@ -581,9 +594,6 @@ class GameView(context: Context, attrs: AttributeSet?) :
                     }
                 }
             }
-
-            // ===== 背景群の逆スクロール適用終了 =====
-            //canvas.restore()
 
             // ===== プレイヤー描画（逆スクロールをかけない） =====
             run {
@@ -724,6 +734,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
     private fun restartGame() {
         world.reset() // ★World側で初期化処理を用意
+        world.grantStartSafety(durationMs = 2500L, horizRange = 1, vertRange = 2)
         reverseScrollOffsetPx = 0f
         fallTimer = 0f
         playerAlpha = 1f

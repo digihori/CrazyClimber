@@ -1,27 +1,20 @@
 package tk.horiuchi.crazyclimber.core
 
 import android.util.Log
-import tk.horiuchi.crazyclimber.core.Config.WINDOW_BASE_MS
-import tk.horiuchi.crazyclimber.core.Config.WINDOW_FLOOR_COEF
-import tk.horiuchi.crazyclimber.core.Config.WINDOW_JITTER_MS
-import tk.horiuchi.crazyclimber.core.Config.WINDOW_MIN_MS
 import kotlin.math.max
 import kotlin.random.Random
 
 class World {
     // ===== Debug flags =====
     @Volatile var debugNoOjisan: Boolean = false
-    @Volatile var debugWindowsNeverClose: Boolean = true
-    var windowSpeedScale = 1.0f
+    @Volatile var debugWindowsNeverClose: Boolean = false
+    //var windowSpeedScale = 1.0f
 
-    private val rnd = Random(0xCC1122)
+    private val rnd = Random(System.nanoTime())
     val player = Player()
 
     // 5xFLOORS の窓状態と次遷移時刻
     private val windows = Array(Config.FLOORS) { Array(Config.COLS) { WindowState.OPEN } }
-    private val nextTick = Array(Config.FLOORS) { Array(Config.COLS) { 0L } }
-
-    //private val inputSeq = InputSequencer()
     private val shiftLatch = ShiftLatch(Config.SIMUL_PRESS_WINDOW_MS.toLong())
 
     var currentTimeMs: Long = 0
@@ -43,6 +36,54 @@ class World {
     private val SHIFT_COOLDOWN_MS = 220L       // ← GameViewのshiftMsと同じに
     private var nextShiftOkMs = 0L             // 次に横移動を許可する時刻（ms）
 
+    // ===== 窓アニメ（3段＋CLOSED/OPENING） =====
+    enum class WindowAnim { OPEN, CLOSING1, CLOSING2, CLOSING3, CLOSED, OPENING3, OPENING2, OPENING1 }
+
+    private val winAnim  = Array(Config.FLOORS) { Array(Config.COLS) { WindowAnim.OPEN } }
+    private val nextTick = Array(Config.FLOORS) { Array(Config.COLS) { 0L } }
+
+    // 可視範囲（GameViewから毎フレーム渡す）
+    private var visTopFloor = 0
+    private var visRows = 0
+
+    // アニメ速度（閉/開とも ≒5秒）
+    companion object {
+        private const val WINDOW_STEPS = 3
+        private const val CLOSE_TOTAL_MS = 5000L
+        private const val OPEN_TOTAL_MS  = 5000L
+        private const val CLOSED_HOLD_MS = 400L
+        private const val SELECT_INTERVAL_MS = 1800L
+        private const val FORCE_CLOSE_IDLE_MS = 10_000L
+        private const val OPEN_MIN_HOLD_MS   = 1500L  // OPENを最低この時間は維持
+        private const val CLOSED_MIN_HOLD_MS = 2000L  // CLOSEDを最低この時間は維持（★閉じは長め）
+    }
+    private val CLOSE_STEP_MS = CLOSE_TOTAL_MS / WINDOW_STEPS
+    private val OPEN_STEP_MS  = OPEN_TOTAL_MS  / WINDOW_STEPS
+
+    // 仕様：初期クローズ比率＆トグル比率
+    private var initialClosedRatio = 0.10f    // 初期：可視20%をCLOSEDに
+    private var toggleRatio        = 0.20f    // 周期：可視20%をトグル（OPEN→閉始/ CLOSED→開始）
+
+    // 同時にアニメ中でよい窓の上限（見えている総数に対する割合）
+    private var maxActiveRatio = 0.06f      // ← 6% くらいから様子見（多いなら 0.04f など）
+    // 1回の抽選で新規に動かす割合（小さめ）
+    private var toggleBatchRatio = 0.02f    // ← 2%/回。多いなら 0.01f
+    // 新規に動かすうち「閉じ方向」に回す比率
+    private var desiredCloseShare = 0.30f   // ← 30% を閉じ、70% を開け
+    // --- 窓の同時アクティブ上限＆抽選強度 ---
+    private var closeStartBatchRatio  = 0.03f   // 1回の抽選で「OPEN→閉じ」を始める比率
+    private var openStartBatchRatio   = 0.03f  // 1回の抽選で「CLOSED→開け」を始める比率（低め）
+
+    // トグル抽選間隔
+    private var nextSelectMs = 0L
+
+    // “初めて見えた階”に初期20%クローズを配る
+    private val seededFloor = BooleanArray(Config.FLOORS)
+
+    // 10秒停止で強制クローズ
+    private var lastPosChangeMs = 0L
+    private var prevCellForIdle = player.pos.copy()
+
 
     init {
         // 適当に初期化
@@ -59,13 +100,34 @@ class World {
 
     fun update(dtMs: Long) {
         currentTimeMs += dtMs
-        updateWindows()
+
+        if (debugWindowsNeverClose) {
+            forceOpenAllWindows()
+        } else {
+            // 窓まわり
+            seedInitialClosedIfNeeded()  // ★初めて見えた階に20%閉を配る
+            handleForceCloseByIdle()
+            stepWindowAnimAndTrigger()
+            toggleSomeVisibleWindows()   // ★可視20%をトグル抽選
+        }
+
         updateOjisanAndPots(dtMs)
         // クリア条件（仮）：最上階に到達したら固定ボーナス
         if (player.pos.floor >= Config.FLOORS - 1) {
             // クリア演出は後で。とりあえず何もしない
         }
     }
+
+    private fun forceOpenAllWindows() {
+        for (f in 0 until Config.FLOORS)
+            for (c in 0 until Config.COLS) {
+                winAnim[f][c]  = WindowAnim.OPEN
+                nextTick[f][c] = 0L
+                // クールダウンを使っているなら
+                //if (::nextEligible.isInitialized) nextEligible[f][c] = 0L
+            }
+    }
+
 
     private fun updateOjisanAndPots(dtMs: Long) {
         //Log.d("OjisanDebug", "updateOjisanAndPots() called")
@@ -206,105 +268,288 @@ class World {
         repeat(6) {
             val f = rnd.nextInt(f0, f1 + 1)
             val c = rnd.nextInt(0, Config.COLS)
-            if (getWindow(Cell(c, f)) == WindowState.OPEN) {
+            val cell = Cell(c, f)
+            if (!isTransition(cell) && !isClosed(cell)) {
                 ojisans += Ojisan(col = c, floor = f)
                 return
             }
         }
     }
 
-
-    private fun updateWindows() {
-        if (debugWindowsNeverClose) {
-            // 全部開けっぱなしにして終了
-            for (f in 0 until Config.FLOORS)
-                for (c in 0 until Config.COLS)
-                    windows[f][c] = WindowState.OPEN
-            return
-        }
-
-        for (f in 0 until Config.FLOORS) {
-            for (c in 0 until Config.COLS) {
-
-                // ★ ここで毎フレーム OPEN に戻すような処理は入れないこと！
-
-                if (currentTimeMs >= nextTick[f][c]) {
-                    // 次の状態へ遷移
-                    windows[f][c] = when (windows[f][c]) {
-                        WindowState.OPEN   -> WindowState.HALF
-                        WindowState.HALF   -> WindowState.CLOSED
-                        WindowState.CLOSED -> WindowState.OPEN
-                    }
-
-                    // 次の切替時刻を計算（下限を設けてフラッシュ防止）
-                    val base = max(WINDOW_MIN_MS, WINDOW_BASE_MS - f * WINDOW_FLOOR_COEF)
-                    val jitter = rnd.nextLong(WINDOW_JITTER_MS)
-                    val dur = ((base + jitter) * windowSpeedScale).toLong()
-                    nextTick[f][c] = currentTimeMs + max(200L, dur) // 最低200msは保証
-                }
-            }
-        }
-
-        // 掴んでいる窓が閉まったら落下（演出はGameView側に寄せたいなら notifyHit() に統一も可）
-        if (mustFallByWindow()) {
-            player.fall()
-            val cpFloor = (player.pos.floor / 10) * 10
-            player.pos = Cell(player.pos.col, cpFloor)
-            windows[player.pos.floor][player.pos.col] = WindowState.OPEN
-            lastUnstable = null
-        }
-
-
-        /*
-        for (f in 0 until Config.FLOORS) {
-            for (c in 0 until Config.COLS) {
-                windows[f][c] = WindowState.OPEN
-
-                if (currentTimeMs >= nextTick[f][c]) {
-                    windows[f][c] = when (windows[f][c]) {
-                        WindowState.OPEN -> WindowState.HALF
-                        WindowState.HALF -> WindowState.CLOSED
-                        WindowState.CLOSED -> WindowState.OPEN
-                    }
-                    val base = max(
-                        Config.WINDOW_MIN_MS.toLong(),
-                        Config.WINDOW_BASE_MS.toLong() - f * 4L
-                    )
-                    nextTick[f][c] = currentTimeMs + base + rnd.nextLong(900)
-                }
-            }
-        }
-        // 掴んでいる窓が閉まったら即落下
-        if (mustFallByWindow()) {
-            //player.fall()
-            notifyHit()
-            val cpFloor = (player.pos.floor / 10) * 10
-            player.pos = Cell(player.pos.col, cpFloor)
-            // 安全化
-            windows[player.pos.floor][player.pos.col] = WindowState.OPEN
-            lastUnstable = null
-        }
-
-         */
-
+    fun setVisibleRange(topFloor: Int, rows: Int) {
+        visTopFloor = topFloor.coerceIn(0, Config.FLOORS - 1)
+        visRows     = rows.coerceIn(0, Config.FLOORS)
     }
 
-    private fun mustFallByWindow(): Boolean {
-        return when (player.hands) {
-            HandPair.BOTH_UP,
-            HandPair.L_UP_R_DOWN,
-            HandPair.L_DOWN_R_UP -> {
-                // 上に手がかかっている系：一段上の窓が閉なら落下
-                val up = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-                getWindow(up) == WindowState.CLOSED
-            }
-            HandPair.BOTH_DOWN -> {
-                // 両手下：現在の窓が閉なら落下
-                getWindow(player.pos) == WindowState.CLOSED
+    // steps=3 のとき、OPEN=0、CLOSING1=0.25、CLOSING2=0.5、CLOSING3=0.75、CLOSED=1.0
+    fun getWindowCloseProgress(cell: Cell): Float {
+        val f = cell.floor.coerceIn(0, Config.FLOORS - 1)
+        val c = cell.col.coerceIn(0, Config.COLS - 1)
+        val k = WINDOW_STEPS + 1f
+        return when (winAnim[f][c]) {
+            WindowAnim.OPEN       -> 0f
+            WindowAnim.CLOSING1   -> 1f / k
+            WindowAnim.CLOSING2   -> 2f / k
+            WindowAnim.CLOSING3   -> 3f / k
+            WindowAnim.CLOSED     -> 1f
+            WindowAnim.OPENING3   -> 3f / k
+            WindowAnim.OPENING2   -> 2f / k
+            WindowAnim.OPENING1   -> 1f / k
+        }
+    }
+
+    private fun isClosed(cell: Cell) = getWindowCloseProgress(cell) >= 1f
+    private fun isTransition(cell: Cell): Boolean {
+        val f = cell.floor.coerceIn(0, Config.FLOORS - 1)
+        val c = cell.col.coerceIn(0, Config.COLS - 1)
+        return when (winAnim[f][c]) {
+            WindowAnim.CLOSING1, WindowAnim.CLOSING2, WindowAnim.CLOSING3,
+            WindowAnim.OPENING1, WindowAnim.OPENING2, WindowAnim.OPENING3 -> true
+            else -> false
+        }
+    }
+
+    private fun seedInitialClosedIfNeeded() {
+        if (visRows <= 0) return
+        val start = visTopFloor
+        val end   = (visTopFloor + visRows).coerceAtMost(Config.FLOORS)
+        for (f in start until end) {
+            if (seededFloor[f]) continue
+            seededFloor[f] = true
+
+            for (c in 0 until Config.COLS) {
+                val cell = Cell(c, f)
+                if (isInSafeZone(cell)) continue
+                if (rnd.nextFloat() < initialClosedRatio) {
+                    winAnim[f][c]  = WindowAnim.CLOSED
+                    nextTick[f][c] = 0L
+                    nextEligible[f][c] = currentTimeMs + CLOSED_MIN_HOLD_MS
+                }
             }
         }
     }
 
+    // 同じ窓を連発で選ばないためのクールダウン
+    //private val CELL_COOLDOWN_MS = 4000L
+    private val nextEligible = Array(Config.FLOORS) { Array(Config.COLS) { 0L } }
+    private fun toggleSomeVisibleWindows() {
+        if (visRows <= 0 || currentTimeMs < nextSelectMs) return
+        nextSelectMs = currentTimeMs + SELECT_INTERVAL_MS
+
+        val start = visTopFloor
+        val end   = (visTopFloor + visRows).coerceAtMost(Config.FLOORS)
+        val cols  = Config.COLS
+
+        var activeNow = 0
+        val opens   = ArrayList<Cell>()   // 安定OPEN（抽選可）
+        val closeds = ArrayList<Cell>()   // 安定CLOSED（抽選可）
+
+        for (f in start until end) for (c in 0 until cols) {
+            when (winAnim[f][c]) {
+                WindowAnim.OPEN   -> if (currentTimeMs >= nextEligible[f][c]) opens   += Cell(c, f)
+                WindowAnim.CLOSED -> if (currentTimeMs >= nextEligible[f][c]) closeds += Cell(c, f)
+                WindowAnim.CLOSING1, WindowAnim.CLOSING2, WindowAnim.CLOSING3,
+                WindowAnim.OPENING1, WindowAnim.OPENING2, WindowAnim.OPENING3 -> activeNow++
+            }
+        }
+
+        val totalVisible = (end - start) * cols
+        val maxActive    = kotlin.math.max(1, kotlin.math.floor(totalVisible * maxActiveRatio).toInt())
+        var headroom     = (maxActive - activeNow).coerceAtLeast(0)
+        if (headroom <= 0) return
+
+        // バッチ上限
+        val batchCloseMax = kotlin.math.max(1, kotlin.math.floor(totalVisible * closeStartBatchRatio).toInt())
+        val batchOpenMax  = kotlin.math.max(1, kotlin.math.floor(totalVisible * openStartBatchRatio ).toInt())
+
+        // ★ 閉じが多い時は“開け”を優先配分
+        val stableTotal  = opens.size + closeds.size
+        val closedRatio  = if (stableTotal > 0) closeds.size.toFloat() / stableTotal else 0f
+        val preferOpen   = closedRatio >= 0.30f
+
+        var toOpen  = 0
+        var toClose = 0
+
+        if (preferOpen) {
+            // まず「開け」に枠を割り当て、残りを「閉じ」に
+            toOpen  = kotlin.math.min(kotlin.math.min(closeds.size, batchOpenMax),  headroom)
+            toClose = kotlin.math.min(kotlin.math.min(opens.size,   batchCloseMax), headroom - toOpen)
+        } else {
+            // これまで通り閉じ優先
+            toClose = kotlin.math.min(kotlin.math.min(opens.size,   batchCloseMax), headroom)
+            toOpen  = kotlin.math.min(kotlin.math.min(closeds.size, batchOpenMax),  headroom - toClose)
+        }
+
+        // ★ 候補があるなら「開け」を最低1枚は確保（枠を盗む）
+        if (toOpen == 0 && closeds.isNotEmpty() && headroom > 0) {
+            if (toClose > 0) { toClose -= 1; toOpen = 1 } else { toOpen = 1 }
+        }
+        if (toOpen <= 0 && toClose <= 0) return
+
+        opens.shuffle(rnd); closeds.shuffle(rnd)
+
+        repeat(toClose) {
+            val cell = opens[it]; val f = cell.floor; val c = cell.col
+            ojisans.removeAll { o -> o.floor == f && o.col == c }
+            winAnim[f][c]  = WindowAnim.CLOSING1
+            nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS
+            nextEligible[f][c] = currentTimeMs + OPEN_MIN_HOLD_MS
+        }
+        repeat(toOpen) {
+            val cell = closeds[it]; val f = cell.floor; val c = cell.col
+            ojisans.removeAll { o -> o.floor == f && o.col == c }
+            winAnim[f][c]  = WindowAnim.OPENING3
+            nextTick[f][c] = currentTimeMs + OPEN_STEP_MS
+            nextEligible[f][c] = currentTimeMs + CLOSED_MIN_HOLD_MS / 2
+        }
+    }
+
+    // 両手上 or 片手上 なら「上の窓」を対象にする
+    private fun usesUpperGrip(): Boolean = when (player.hands) {
+        HandPair.BOTH_UP, HandPair.L_UP_R_DOWN, HandPair.L_DOWN_R_UP -> true
+        HandPair.BOTH_DOWN -> false
+    }
+
+    // ★追加：次の「一段登る」ために新しく掴む必要がある窓
+    private fun reachCellForNextStep(): Cell {
+        val needFloor =
+            if (usesUpperGrip()) player.pos.floor + 2   // 両手上/片手上ならさらに+2を掴みに行く
+            else                  player.pos.floor + 1   // 両手下なら+1を掴む
+        return Cell(player.pos.col, needFloor.coerceAtMost(Config.FLOORS - 1))
+    }
+
+    // ★追加：横移動のときに衝突判定へ使う窓
+    private fun destCellForHorizontal(dx: Int): Cell {
+        val col = (player.pos.col + dx).coerceIn(0, Config.COLS - 1)
+        val f   =
+            if (usesUpperGrip()) (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1) // 上を握って横移動
+            else                  player.pos.floor                                       // 両手下は同じ階
+        return Cell(col, f)
+    }
+
+    private fun targetCellForFall(): Cell =
+        if (usesUpperGrip())
+            Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
+        else
+            player.pos
+
+    private fun stepWindowAnimAndTrigger() {
+        for (f in 0 until Config.FLOORS) for (c in 0 until Config.COLS) {
+            if (currentTimeMs < nextTick[f][c]) continue
+            when (winAnim[f][c]) {
+                WindowAnim.OPEN -> Unit
+
+                WindowAnim.CLOSING1 -> { winAnim[f][c] = WindowAnim.CLOSING2; nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS }
+                WindowAnim.CLOSING2 -> { winAnim[f][c] = WindowAnim.CLOSING3; nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS }
+                WindowAnim.CLOSING3 -> {
+                    winAnim[f][c]  = WindowAnim.CLOSED
+                    nextTick[f][c] = 0L
+                    // ★ CLOSED 到達時に最低保持をセット
+                    nextEligible[f][c] = (currentTimeMs + CLOSED_MIN_HOLD_MS)
+
+                    // 閉じ切った瞬間に対象セルなら即ヒット
+                    val tgt = targetCellForFall()
+                    if (tgt.floor == f && tgt.col == c) notifyHit()
+                }
+
+                // ★ ここを“自動で開けない”仕様に変更
+                WindowAnim.CLOSED -> {
+                    // 何もしない（OPENING*は抽選でのみ開始）
+                }
+
+                WindowAnim.OPENING3 -> { winAnim[f][c] = WindowAnim.OPENING2; nextTick[f][c] = currentTimeMs + OPEN_STEP_MS }
+                WindowAnim.OPENING2 -> { winAnim[f][c] = WindowAnim.OPENING1; nextTick[f][c] = currentTimeMs + OPEN_STEP_MS }
+                WindowAnim.OPENING1 -> {
+                    winAnim[f][c]  = WindowAnim.OPEN
+                    nextTick[f][c] = 0L
+                    // ★ OPEN 到達時も最低保持
+                    nextEligible[f][c] = (currentTimeMs + OPEN_MIN_HOLD_MS)
+                }
+            }
+        }
+    }
+
+    // === 安全地帯（窓を強制OPENする時間＆範囲） ===
+    private var windowSafeUntilMs = 0L
+    private var safeAnchor = Cell(0, 0)
+    private var safeVR = 0      // 縦方向の範囲（anchor.floor 〜 anchor.floor + safeVR）
+    private var safeHR = 0      // 横方向の範囲（anchor.col - safeHR 〜 + safeHR）
+
+    private fun isInSafeZone(cell: Cell): Boolean {
+        if (currentTimeMs >= windowSafeUntilMs) return false
+        val f0 = safeAnchor.floor
+        val c0 = safeAnchor.col
+        val f = cell.floor
+        val c = cell.col
+        return (f in f0..(f0 + safeVR)) && (kotlin.math.abs(c - c0) <= safeHR)
+    }
+
+    /** セーフゾーンを設定＆対象窓を強制OPEN＆再抽選を抑止 */
+    fun grantStartSafety(durationMs: Long = 2500L, horizRange: Int = 1, vertRange: Int = 2) {
+        safeAnchor = player.pos.copy()
+        safeHR = horizRange
+        safeVR = vertRange
+        windowSafeUntilMs = currentTimeMs + durationMs
+
+        val fStart = safeAnchor.floor
+        val fEnd   = (safeAnchor.floor + safeVR).coerceAtMost(Config.FLOORS - 1)
+        val cStart = (safeAnchor.col - safeHR).coerceAtLeast(0)
+        val cEnd   = (safeAnchor.col + safeHR).coerceAtMost(Config.COLS - 1)
+
+        for (f in fStart..fEnd) for (c in cStart..cEnd) {
+            winAnim[f][c]  = WindowAnim.OPEN
+            nextTick[f][c] = 0L
+            nextEligible[f][c] = windowSafeUntilMs   // この時間までは抽選対象にしない
+            // おじさんもその窓だけ排他
+            ojisans.removeAll { o -> o.floor == f && o.col == c }
+        }
+    }
+
+    private fun handleForceCloseByIdle() {
+        // 位置が変わったら記録
+        if (player.pos != prevCellForIdle) {
+            prevCellForIdle = player.pos.copy()
+            lastPosChangeMs = currentTimeMs
+        }
+        if (currentTimeMs - lastPosChangeMs < FORCE_CLOSE_IDLE_MS) return
+
+        // 対象窓：両下なら現在、片手/両上なら一つ上
+        val tgt = targetCellForFall()   // ★ここも統一
+        val f = tgt.floor; val c = tgt.col
+
+        // ★ いきなり CLOSED にせず、「今の状態から」閉方向へスイッチ
+        when (winAnim[f][c]) {
+            // 安定OPEN／開きかけ → 閉じ始め（進捗に合わせた段へ）
+            WindowAnim.OPEN,
+            WindowAnim.OPENING1 -> {
+                winAnim[f][c]  = WindowAnim.CLOSING1
+                nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS
+            }
+            WindowAnim.OPENING2 -> {
+                winAnim[f][c]  = WindowAnim.CLOSING2
+                nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS
+            }
+            WindowAnim.OPENING3 -> {
+                winAnim[f][c]  = WindowAnim.CLOSING3
+                nextTick[f][c] = currentTimeMs + CLOSE_STEP_MS
+            }
+
+            // すでに閉方向に動いている／閉じているならそのまま
+            WindowAnim.CLOSING1,
+            WindowAnim.CLOSING2,
+            WindowAnim.CLOSING3 -> {
+                // 何もしない（既に閉じに向かっている）
+            }
+            WindowAnim.CLOSED -> {
+                // もう閉じ切っているなら、ここで即落下させても良い
+                // （“閉じる瞬間のみ落下”ポリシーなら、この行は外してOK）
+                notifyHit()
+            }
+        }
+
+        // 連続発火を防ぐ（次の移動まで余裕を持たせる）
+        lastPosChangeMs = currentTimeMs + FORCE_CLOSE_IDLE_MS
+    }
 
     private fun isStable(left: LeverDir, right: LeverDir): Boolean =
         (left == LeverDir.UP && right == LeverDir.UP) ||
@@ -313,7 +558,7 @@ class World {
     // Lever入力から行動を決定
     private fun climb(toPose: PlayerPose) {
         val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-        if (getWindow(next) == WindowState.CLOSED) return
+        if (isClosed(next)) return
         player.stepClimbAccepted()
         player.pose = toPose
         player.hands = when (toPose) {
@@ -351,38 +596,35 @@ class World {
 
         // --- 新仕様：BOTH_DOWN 中に片手だけ上げても登らない（ポーズのみ変更） ---
         if (player.hands == HandPair.BOTH_DOWN && curDiag != null) {
-            // 見た目と内部状態だけ不安定へ。lastUnstableもセットしておくと次の逆斜めで登れる
-            if (curDiag == UnstablePattern.LUP_RDOWN) {
-                player.pose = PlayerPose.LUP_RDOWN
-                player.hands = HandPair.L_UP_R_DOWN
-            } else {
-                player.pose = PlayerPose.LDOWN_RUP
-                player.hands = HandPair.L_DOWN_R_UP
+            //val upCell = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
+            val next = reachCellForNextStep()
+            if (!isClosed(next)) {
+                // 見た目と内部状態だけ不安定へ。lastUnstableもセットしておくと次の逆斜めで登れる
+                if (curDiag == UnstablePattern.LUP_RDOWN) {
+                    player.pose = PlayerPose.LUP_RDOWN
+                    player.hands = HandPair.L_UP_R_DOWN
+                } else {
+                    player.pose = PlayerPose.LDOWN_RUP
+                    player.hands = HandPair.L_DOWN_R_UP
+                }
+                lastUnstable = curDiag
             }
-            lastUnstable = curDiag
             // 横移動は不安定なので不可、処理終了
             return
         }
         // === 先に「仕様の2項」を強制適用 ===
         // (A) UNSTABLE → 両手下（BOTH_DOWN）で +1階（着地＝BOTH_DOWN）
         if (wasUnstable && inputBothDown) {
-            val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-            if (getWindow(next) != WindowState.CLOSED) {
-                player.stepClimbAccepted()
-                applyPose(PlayerPose.BOTH_DOWN)
-                lastUnstable = null   // シーケンス完了
-            }
-            // 横移動は安定に戻ってから判定させたいので、このフレームはここで終了
+            player.stepClimbAccepted()
+            applyPose(PlayerPose.BOTH_DOWN)
+            lastUnstable = null   // シーケンス完了
             return
         }
 
         // (A2) STABLE 両手上（BOTH_UP） → 両手下（BOTH_DOWN）で +1階
         if (wasStable && player.hands == HandPair.BOTH_UP && inputBothDown) {
-            val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-            if (getWindow(next) != WindowState.CLOSED) {
-                player.stepClimbAccepted()
-                applyPose(PlayerPose.BOTH_DOWN)
-            }
+            player.stepClimbAccepted()
+            applyPose(PlayerPose.BOTH_DOWN)
             return
         }
 
@@ -392,9 +634,6 @@ class World {
             val dir = shiftLatch.feed(left, right, nowMs)
             if (dir == LeverDir.LEFT || dir == LeverDir.RIGHT) {
                 tryShiftDir(dir)
-                //val dx = if (dir == LeverDir.LEFT) -1 else 1
-                //val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
-                //if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
             }
             return
         }
@@ -405,8 +644,8 @@ class World {
         if (wasStable && curDiag != null) {
             val poseAfter = if (curDiag == UnstablePattern.LUP_RDOWN)
                 PlayerPose.LUP_RDOWN else PlayerPose.LDOWN_RUP
-            val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-            if (getWindow(next) != WindowState.CLOSED) {
+            val next = reachCellForNextStep()
+            if (!isClosed(next)) {
                 player.stepClimbAccepted()
                 applyPose(poseAfter)
                 lastUnstable = curDiag
@@ -418,8 +657,8 @@ class World {
         if (wasUnstable && curDiag != null && curDiag != lastUnstable) {
             val poseAfter = if (curDiag == UnstablePattern.LUP_RDOWN)
                 PlayerPose.LUP_RDOWN else PlayerPose.LDOWN_RUP
-            val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-            if (getWindow(next) != WindowState.CLOSED) {
+            val next = reachCellForNextStep()
+            if (!isClosed(next)) {
                 player.stepClimbAccepted()
                 applyPose(poseAfter)
                 lastUnstable = curDiag
@@ -429,14 +668,16 @@ class World {
 
         // === 見た目ポーズの更新（CENTERや無関係入力では維持） ===
         // ここでは禁止事項（BOTH_DOWN→BOTH_UP）を再度尊重
+        val next = reachCellForNextStep()
+        val canReachUp = !isClosed(next)
         when {
             inputBothDown -> applyPose(PlayerPose.BOTH_DOWN)
             inputBothUp   -> {
                 if (player.hands != HandPair.BOTH_DOWN) applyPose(PlayerPose.BOTH_UP)
                 // 両下→両上は通さない
             }
-            curDiag == UnstablePattern.LUP_RDOWN -> applyPose(PlayerPose.LUP_RDOWN)
-            curDiag == UnstablePattern.LDOWN_RUP -> applyPose(PlayerPose.LDOWN_RUP)
+            curDiag == UnstablePattern.LUP_RDOWN -> if (canReachUp) applyPose(PlayerPose.LUP_RDOWN)
+            curDiag == UnstablePattern.LDOWN_RUP -> if (canReachUp) applyPose(PlayerPose.LDOWN_RUP)
             else -> { /* CENTERや左右はポーズ維持 */ }
         }
 
@@ -445,67 +686,22 @@ class World {
             val dir = shiftLatch.feed(left, right, nowMs)
             if (dir == LeverDir.LEFT || dir == LeverDir.RIGHT) {
                 tryShiftDir(dir)
-                //val dx = if (dir == LeverDir.LEFT) -1 else 1
-                //val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
-                //if (getWindow(next) != WindowState.CLOSED) player.shift(dx)
             }
         } else {
             shiftLatch.reset()
         }
     }
 
-
-    /*
-    // プレイヤーの見た目ポーズを更新する処理の例
-    fun updatePlayerPose(left: LeverDir, right: LeverDir) {
-        // レバーが両方 CENTER の場合はポーズ変更なし
-        if (left == LeverDir.CENTER && right == LeverDir.CENTER) {
-            return // 何もせず終了 → 前回のポーズを保持
-        }
-
-        val newPose = when {
-            left == LeverDir.UP   && right == LeverDir.UP   -> PlayerPose.BOTH_UP
-            left == LeverDir.DOWN && right == LeverDir.DOWN -> PlayerPose.BOTH_DOWN
-            left == LeverDir.UP   && right == LeverDir.DOWN -> PlayerPose.LUP_RDOWN
-            left == LeverDir.DOWN && right == LeverDir.UP   -> PlayerPose.LDOWN_RUP
-            else -> player.pose
-        }
-        player.pose = newPose
-        // ★hands を pose に合わせて更新（ここが重要）
-        player.hands = when (newPose) {
-            PlayerPose.BOTH_UP   -> HandPair.BOTH_UP
-            PlayerPose.BOTH_DOWN -> HandPair.BOTH_DOWN
-            PlayerPose.LUP_RDOWN -> HandPair.L_UP_R_DOWN
-            PlayerPose.LDOWN_RUP -> HandPair.L_DOWN_R_UP
-        }
-    }
-
-     */
-
-    /*
-    private fun poseToUnstable(pose: PlayerPose): UnstablePattern = when (pose) {
-        PlayerPose.LUP_RDOWN -> UnstablePattern.LUP_RDOWN  // ＞
-        PlayerPose.LDOWN_RUP -> UnstablePattern.LDOWN_RUP  // ＜
-        else -> UnstablePattern.NONE                       // ▽ / △ は安定
-    }
-
-     */
-
-    /*
-    private fun unstableOrNull(left: LeverDir, right: LeverDir): UnstablePattern? = when {
-        left == LeverDir.UP   && right == LeverDir.DOWN -> UnstablePattern.LUP_RDOWN // ＞
-        left == LeverDir.DOWN && right == LeverDir.UP   -> UnstablePattern.LDOWN_RUP // ＜
-        else -> null
-    }
-
-     */
-
     private fun tryShiftDir(dir: LeverDir) {
-        if (currentTimeMs < nextShiftOkMs) return  // ★クールタイム中は無視
+        if (currentTimeMs < nextShiftOkMs) {
+            //Log.d("tryShiftDir", "${currentTimeMs}, ${nextShiftOkMs}")
+            return
+        }  // クールタイム中は無視
 
         val dx = if (dir == LeverDir.LEFT) -1 else +1
-        val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
-        if (getWindow(next) != WindowState.CLOSED) {
+        //val next = Cell((player.pos.col + dx).coerceIn(0, Config.COLS - 1), player.pos.floor)
+        val next = destCellForHorizontal(dx)
+        if (!isClosed(next)) {
             player.shift(dx)
             nextShiftOkMs = currentTimeMs + SHIFT_COOLDOWN_MS  // ★次回許可時刻を更新
         }
@@ -530,7 +726,16 @@ class World {
         player.lives = 3
         player.score = 0
         player.pose = PlayerPose.BOTH_UP
-        player.hands  = HandPair.BOTH_UP
+        player.hands = HandPair.BOTH_UP
+
+        for (f in 0 until Config.FLOORS) for (c in 0 until Config.COLS) {
+            winAnim[f][c] = WindowAnim.OPEN
+            nextTick[f][c] = 0L
+        }
+        seededFloor.fill(false)
+        nextSelectMs = 0L
+        lastPosChangeMs = currentTimeMs
+        prevCellForIdle = player.pos.copy()
 
         // 内部状態
         lastUnstable = null
@@ -540,22 +745,17 @@ class World {
         pots.clear()
         ojisans.clear()
 
-        // 窓の初期状態リセット
-        //for (y in 0 until Config.FLOORS) {
-            //for (x in 0 until Config.COLS) {
-                //setWindow(Cell(x, y), WindowState.CLOSED)
-            //}
-        //}
-
         // フラグ・タイマーのリセット
         hitFlag = false
-        //gameTimer = 0L
-        //spawnTimer = 0L
-        currentTimeMs = 0L
-        nextOjisanCheckMs = 0L
-        ojisanCooldownMs = 0L
+
+        //currentTimeMs = 0L ←これはリセットしちゃダメ！
+        nextShiftOkMs      = currentTimeMs
+        nextOjisanCheckMs  = currentTimeMs
+        ojisanCooldownMs   = 0L
+        nextSelectMs       = currentTimeMs
+        lastPosChangeMs    = currentTimeMs
+        windowSafeUntilMs  = 0L
         safeUntilMs = 3000L
-        hitFlag = false
     }
 
 }
