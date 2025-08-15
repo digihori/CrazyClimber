@@ -3,6 +3,7 @@ package tk.horiuchi.crazyclimber.ui.view
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
+import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -56,7 +57,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
     // ====== 最高到達階（チェックポイント判定用） ======
     private var highestFloor = 1
-    private val checkpoints = listOf(10, 20, 30, 40)
+    private val checkpoints = listOf(10, 20, 30, 40, 50, 60)
 
     // ====== 被弾の震え演出（必要なら継続使用可） ======
     private var playerShakeMs: Long = 0L
@@ -90,6 +91,8 @@ class GameView(context: Context, attrs: AttributeSet?) :
     private var goBlinkMs = 0L               // 点滅タイマ
     private var goBlinkOn = true             // 表示/非表示トグル
     private val goBlinkIntervalMs = 500L     // 点滅間隔（お好みで）
+
+    private var kongFrames: Array<Bitmap?> = arrayOfNulls(2)
 
     init {
         holder.addCallback(this)
@@ -407,6 +410,8 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
             // ★ 有効カメラ：下に revRows 階ぶんズラす（＝建物が下へ流れて見える）
             val cameraTopEffective = (cameraTopBase + revRows).coerceIn(0, maxTop)
+            val bossView = world.getBossView(cameraTopEffective, visibleRows)
+            val centerCol = Config.COLS / 2
 
             fun easeOutCubic(t: Float) = 1f - (1f - t) * (1f - t) * (1f - t)
             val kUp = easeOutCubic(climbT)
@@ -458,48 +463,125 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
                 for (r in 0 until visibleRows) {
                     val floor = (cameraTopEffective + r).coerceAtMost(Config.FLOORS - 1)
-                    val mask = colVisibleMaskFor(floor)
                     val top = (height - (r + 1) * tileH + climbOffsetPx)
 
-                    for (col in 0 until cols) {
+                    // この行が“ボス露出許可”内か？
+                    val bossRowVisible = bossView?.let {
+                        floor in it.bottom .. (it.bottom + it.reveal - 1)
+                    } ?: false
+                    val bossLeft  = bossView?.leftCol ?: -999
+                    val bossRight = if (bossView != null) bossLeft + bossView.width - 1 else -999
 
+                    val mask = colVisibleMaskFor(floor)
+                    for (col in 0 until cols) {
                         val left = col * tileW.toFloat()
 
-                        if (!mask[col]) {
-                            // 非表示列は外壁色で埋める（従来どおり）
-                            p.style = Paint.Style.FILL
-                            p.color = facadeColor
-                            canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, top + offsetY + winH, p)
+                        // ★ボス領域露出中
+                        if (bossRowVisible && col in bossLeft..bossRight) {
+                            if (col == centerCol) {
+                                // 中央列：常時OPEN（黒窓だけ）
+                                p.style = Paint.Style.FILL
+                                p.color = winOpen
+                                canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, top + offsetY + winH, p)
+                            } else {
+                                // サイド2列：単色で埋めて“占有”
+                                p.style = Paint.Style.FILL
+                                p.color = Color.rgb(220, 220, 220) // 好きな色に
+                                canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, top + offsetY + winH, p)
+                            }
                             continue
                         }
 
-                        // 1) 黒い窓枠（全域）
-                        p.style = Paint.Style.FILL
-                        p.color = winOpen /* 黒 */
-                        canvas.drawRect(
-                            left + offsetX,
-                            top + offsetY,
-                            left + offsetX + winW,
-                            top + offsetY + winH,
-                            p
-                        )
+                        // 以降は通常の窓描画（あなたの既存コードそのまま）
+                        if (!mask[col]) { /* …既存の非表示列処理… */ }
 
-                        // 2) 水色パネルを上から progress 分だけ被せる
-                        val prog = world.getWindowCloseProgress(Cell(col, floor)) // 0.0 .. 1.0
+                        // 1) 黒い窓枠
+                        p.style = Paint.Style.FILL
+                        p.color = winOpen
+                        canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, top + offsetY + winH, p)
+
+                        // 2) 水色パネル（閉進捗）
+                        val prog = world.getWindowCloseProgress(Cell(col, floor))
                         if (prog > 0f) {
-                            p.color = winClosed /* 明るい水色（= 閉）*/
+                            p.color = winClosed
                             val panelBottom = top + offsetY + winH * prog
-                            canvas.drawRect(
-                                left + offsetX,
-                                top + offsetY,
-                                left + offsetX + winW,
-                                panelBottom,
-                                p
-                            )
+                            canvas.drawRect(left + offsetX, top + offsetY, left + offsetX + winW, panelBottom, p)
                         }
                     }
                     drawSidePanelsIfNeeded(canvas, floor, top.toFloat(), tileH)
                 }
+            }
+
+            // ==== ボス領域の白塗り（左右どちらに居ても両側固定） ====
+            run {
+                val bv = world.getBossView(cameraTopEffective, visibleRows) ?: return@run
+                val rows = bv.reveal                    // 0..4（今見えてよい段数）
+                if (rows <= 0) return@run
+                Log.d("bossTest", "reveal=${rows}")
+
+                val rBottom  = (bv.bottom - cameraTopEffective)
+                val bottomPx = height - (rBottom * tileH) + climbOffsetPx
+                val topPx    = bottomPx - rows * tileH  // ← 同じボトム基準で上端決定
+
+                val mask = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+
+                // 中央列以外を “topPx..bottomPx” で一気に塗る
+                val center = Config.COLS / 2
+                for (c in 0 until Config.COLS) {
+                    if (c == center) continue
+                    val xL = c * tileW.toFloat()
+                    canvas.drawRect(xL, topPx, xL + tileW, bottomPx, mask)
+                }
+            }
+
+            // ボスの描画
+            run {
+                val bd  = world.getBossDraw() ?: return@run
+                val bmp = kongFrames[bd.pose.coerceIn(0,1)] ?: return@run
+
+                // 白塗りと同じ bottomPx を使う
+                val rBottom  = bd.areaBottom - cameraTopEffective
+                val bottomPx = height - (rBottom * tileH) + climbOffsetPx
+
+                val reveal   = world.getBossView(cameraTopEffective, visibleRows)?.reveal ?: 0
+                if (reveal <= 0) return@run
+                val clipTop  = bottomPx - reveal * tileH
+
+                val tileWf = tileW.toFloat()
+                val sideAreaW = 2 * tileWf
+                val overhangPx = 1f * tileWf         // ★ 通路側へ“1列”ぶん出す
+
+                // 横方向のクリップ範囲（サイド2列＋通路1列）
+                val clipLeft  = if (bd.side < 0) 0f                         else width - sideAreaW - overhangPx
+                val clipRight = if (bd.side < 0) sideAreaW + overhangPx     else width.toFloat()
+
+                // 拡大（赤枠目安）。縦も少し大きく
+                val boxW = (sideAreaW + overhangPx) * 0.94f
+                val boxH = (bd.areaHeight * tileH) * 1.20f
+
+                val s = minOf(boxW / bmp.width, boxH / bmp.height)
+                val w = bmp.width  * s
+                val h = bmp.height * s
+
+                // ★ 下端を bottomPx にピッタリ合わせる
+                val cx = (clipLeft + clipRight) * 0.5f
+                val dst = RectF(cx - w/2f, bottomPx - h, cx + w/2f, bottomPx)
+                val src = Rect(0, 0, bmp.width, bmp.height)
+
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    isFilterBitmap = false
+                    alpha = 255 // 半透明化しない
+                }
+
+                // 下から徐々に露出（拡大しても露出高さは“reveal段分”で一定）
+                canvas.save()
+                canvas.clipRect(clipLeft, clipTop, clipRight, bottomPx)
+
+                if (bd.side > 0) {
+                    canvas.scale(-1f, 1f, dst.centerX(), dst.centerY()) // 右側は反転
+                }
+                canvas.drawBitmap(bmp, src, dst, p)
+                canvas.restore()
             }
 
             // おじさん（DONEは非表示、窓内クリップ）
@@ -739,6 +821,9 @@ class GameView(context: Context, attrs: AttributeSet?) :
         // しらけどりの2フレーム（なければ同じ画像を2回返す実装でOK）
         shirakeFrames[0] = Assets.getShirakeBitmap(0)
         shirakeFrames[1] = Assets.getShirakeBitmap(1)
+        // ボスの2フレーム
+        kongFrames[0] = Assets.getKongBitmap(0)
+        kongFrames[1] = Assets.getKongBitmap(1)
         // 現在の論理位置で初期化
         prevCol   = world.player.pos.col
         prevFloor = world.player.pos.floor

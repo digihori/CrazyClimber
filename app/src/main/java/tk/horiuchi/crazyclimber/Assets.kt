@@ -12,6 +12,9 @@ object Assets {
     private val shirake: Array<Bitmap?> = arrayOfNulls(2)
     private var drop: Bitmap? = null
     private var inited = false
+    private val kong: Array<Bitmap?> = arrayOfNulls(2)
+    //private var kong0: Bitmap? = null
+    //private var kong1: Bitmap? = null
 
     // 画像ファイル名（拡張子なし・res/drawable/ に置く）
     private val poseNames = mapOf(
@@ -31,6 +34,10 @@ object Assets {
         shirake[0] = loadIfExists(context, "shirake1")
         shirake[1] = loadIfExists(context, "shirake2")
         drop    = loadIfExists(context, "drop")
+        kong[0] = loadIfExists(context, "kingkong1")
+        kong[1] = loadIfExists(context, "kingkong2")
+        //if (kong0 == null) kong0 = BitmapFactory.decodeResource(context.resources, R.drawable.kong_idle)
+        //if (kong1 == null) kong1 = BitmapFactory.decodeResource(context.resources, R.drawable.kong_punch)
         inited = true
     }
 
@@ -53,6 +60,10 @@ object Assets {
         return shirake[(frame and 1)]
     }
     fun getBirdDropBitmap(): Bitmap? = drop
+
+    fun getKongBitmap(frame: Int): Bitmap? {
+        return kong[(frame and 1)]
+    }
 
     fun release() {
         playerBitmaps.values.forEach { it?.recycle() }

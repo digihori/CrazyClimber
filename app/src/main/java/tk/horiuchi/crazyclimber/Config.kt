@@ -2,7 +2,7 @@ package tk.horiuchi.crazyclimber.core
 
 object Config {
     const val COLS = 5
-    const val FLOORS = 50
+    const val FLOORS = 60
     const val TILE = 128
     const val FPS = 30
     const val DT_MS = 1000 / FPS

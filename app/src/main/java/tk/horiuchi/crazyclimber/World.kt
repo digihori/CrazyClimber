@@ -8,7 +8,10 @@ class World {
     // ===== Debug flags =====
     @Volatile var debugNoOjisan: Boolean = false
     @Volatile var debugWindowsNeverClose: Boolean = false
+    @Volatile var debugNoShirake: Boolean = false
     @Volatile var debugShirakeLoop: Boolean = false
+    @Volatile var debugNoKong: Boolean = false
+    @Volatile var debugKongLoop: Boolean = false
 
     private val rnd = Random(System.nanoTime())
     val player = Player()
@@ -62,14 +65,14 @@ class World {
 
     // 仕様：初期クローズ比率＆トグル比率
     private var initialClosedRatio = 0.10f    // 初期：可視20%をCLOSEDに
-    private var toggleRatio        = 0.20f    // 周期：可視20%をトグル（OPEN→閉始/ CLOSED→開始）
+    //private var toggleRatio        = 0.20f    // 周期：可視20%をトグル（OPEN→閉始/ CLOSED→開始）
 
     // 同時にアニメ中でよい窓の上限（見えている総数に対する割合）
     private var maxActiveRatio = 0.06f      // ← 6% くらいから様子見（多いなら 0.04f など）
     // 1回の抽選で新規に動かす割合（小さめ）
-    private var toggleBatchRatio = 0.02f    // ← 2%/回。多いなら 0.01f
+    //private var toggleBatchRatio = 0.02f    // ← 2%/回。多いなら 0.01f
     // 新規に動かすうち「閉じ方向」に回す比率
-    private var desiredCloseShare = 0.30f   // ← 30% を閉じ、70% を開け
+    //private var desiredCloseShare = 0.30f   // ← 30% を閉じ、70% を開け
     // --- 窓の同時アクティブ上限＆抽選強度 ---
     private var closeStartBatchRatio  = 0.03f   // 1回の抽選で「OPEN→閉じ」を始める比率
     private var openStartBatchRatio   = 0.03f  // 1回の抽選で「CLOSED→開け」を始める比率（低め）
@@ -84,6 +87,42 @@ class World {
     private var lastPosChangeMs = 0L
     private var prevCellForIdle = player.pos.copy()
 
+    // ===== Boss =====
+    //private enum class BossState { IDLE, WINDUP, PUNCH, RECOVER, MOVE }
+    private data class Boss(
+        var active: Boolean = false,         // 出現中？
+        var side: Int = -1,                  // -1: 左 / +1: 右
+        var areaBottom: Int = 0,             // ボス領域の最下段 floor（含む）
+        var width: Int = 3,                  // 3列（中央に届くため）
+        var height: Int = 3,                 // 3階ぶん
+        var startedAtMs: Long = 0L,          // 出現開始時刻
+        var timeoutAtMs: Long = 0L,          // 強制落下タイムアウト
+        var punching: Boolean = false,       // パンチ中フラグ
+        var punchT: Float = 0f               // 0..1（簡易進行）
+    )
+    private var boss = Boss()
+
+    //private fun bossLeftColFor(side: Int): Int =
+    //    if (side < 0) CENTER_COL - (BOSS_W - 1) else CENTER_COL
+    private var bossDone = false
+
+    private val BOSS_TRIGGER_FLOOR = 40
+    private val BOSS_FORCE_FALL_MS = 10_000L
+    private val BOSS_BOTTOM_FROM_TRIGGER = 7     // 30F + 7 = 37F がボトム
+    private val BOSS_H = 3                       // 3x4 の“4”
+    private val BOSS_W = 3                       // 3x4 の“3”
+    private val CENTER_COL = Config.COLS / 2           // 5列なら 2
+
+    data class BossDraw(
+        val active: Boolean,
+        val side: Int,            // -1 左, +1 右
+        val pose: Int,            // 0:通常, 1:パンチ
+        val areaBottom: Int,      // 下端floor
+        val areaHeight: Int       // 4
+    )
+    private var bossDraw: BossDraw? = null
+    fun getBossDraw(): BossDraw? = bossDraw
+
 
     init {
         // 適当に初期化
@@ -95,11 +134,24 @@ class World {
         }
     }
 
-    fun getWindow(cell: Cell): WindowState =
-        windows[cell.floor.coerceIn(0, Config.FLOORS - 1)][cell.col.coerceIn(0, Config.COLS - 1)]
+    //fun getWindow(cell: Cell): WindowState =
+    //    windows[cell.floor.coerceIn(0, Config.FLOORS - 1)][cell.col.coerceIn(0, Config.COLS - 1)]
 
     fun update(dtMs: Long) {
         currentTimeMs += dtMs
+
+        //triggerBossIfNeeded()
+        if (!debugNoKong) {
+            if (debugKongLoop) {
+                if (!boss.active && player.pos.floor >= 10) {
+                    startBoss(player.pos.floor)
+                }
+            } else {
+                if (!bossDone && !boss.active && player.pos.floor >= BOSS_TRIGGER_FLOOR) {
+                    startBoss(player.pos.floor)
+                }
+            }
+        }
 
         if (debugWindowsNeverClose) {
             forceOpenAllWindows()
@@ -112,6 +164,7 @@ class World {
         }
 
         updateShirake(dtMs)
+        updateBoss(dtMs)
         updateOjisanAndPots(dtMs)
         // クリア条件（仮）：最上階に到達したら固定ボーナス
         if (player.pos.floor >= Config.FLOORS - 1) {
@@ -261,6 +314,7 @@ class World {
     private fun trySpawnOjisan() {
         if (debugNoOjisan) return
         if (shirake.active) return
+        if (boss.active) return
 
         val f0 = player.pos.floor + 2
         val f1 = (player.pos.floor + 4).coerceAtMost(Config.FLOORS - 1)
@@ -308,7 +362,6 @@ class World {
         }
     }
 
-    private fun isClosed(cell: Cell) = getWindowCloseProgress(cell) >= 1f
     private fun isTransition(cell: Cell): Boolean {
         val f = cell.floor.coerceIn(0, Config.FLOORS - 1)
         val c = cell.col.coerceIn(0, Config.COLS - 1)
@@ -328,6 +381,7 @@ class World {
             seededFloor[f] = true
 
             for (c in 0 until Config.COLS) {
+                if (boss.active && inBossRows(f) && c == CENTER_COL) continue
                 val cell = Cell(c, f)
                 if (isInSafeZone(cell)) continue
                 if (rnd.nextFloat() < initialClosedRatio) {
@@ -354,6 +408,7 @@ class World {
         val closeds = ArrayList<Cell>()   // 安定CLOSED（抽選可）
 
         for (f in start until end) for (c in 0 until cols) {
+            if (boss.active && inBossRows(f) && isVisibleFloor(f) && c == CENTER_COL) continue
             when (winAnim[f][c]) {
                 WindowAnim.OPEN   -> if (currentTimeMs >= nextEligible[f][c]) opens   += Cell(c, f)
                 WindowAnim.CLOSED -> if (currentTimeMs >= nextEligible[f][c]) closeds += Cell(c, f)
@@ -515,6 +570,12 @@ class World {
     }
 
     private fun handleForceCloseByIdle() {
+        // ボス出現中は無効
+        if (boss.active) {
+            // ついでにタイマをリセットしておくと、終了直後の誤発火も防げる
+            lastPosChangeMs = currentTimeMs
+            return
+        }
         // 位置が変わったら記録
         if (player.pos != prevCellForIdle) {
             prevCellForIdle = player.pos.copy()
@@ -559,29 +620,6 @@ class World {
         // 連続発火を防ぐ（次の移動まで余裕を持たせる）
         lastPosChangeMs = currentTimeMs + FORCE_CLOSE_IDLE_MS
     }
-
-    /*
-    private fun isStable(left: LeverDir, right: LeverDir): Boolean =
-        (left == LeverDir.UP && right == LeverDir.UP) ||
-                (left == LeverDir.DOWN && right == LeverDir.DOWN)
-     */
-
-    /*
-    // Lever入力から行動を決定
-    private fun climb(toPose: PlayerPose) {
-        val next = Cell(player.pos.col, (player.pos.floor + 1).coerceAtMost(Config.FLOORS - 1))
-        if (isClosed(next)) return
-        player.stepClimbAccepted()
-        player.pose = toPose
-        player.hands = when (toPose) {
-            PlayerPose.BOTH_UP   -> HandPair.BOTH_UP
-            PlayerPose.BOTH_DOWN -> HandPair.BOTH_DOWN
-            PlayerPose.LUP_RDOWN -> HandPair.L_UP_R_DOWN
-            PlayerPose.LDOWN_RUP -> HandPair.L_DOWN_R_UP
-        }
-    }
-
-     */
 
     private fun applyPose(p: PlayerPose) {
         player.pose = p
@@ -733,6 +771,7 @@ class World {
         pots.clear()
         ojisans.clear()
         endShirakeNow()
+        endBoss()
     }
 
     fun reset() {
@@ -765,6 +804,10 @@ class World {
         shirake = Shirake()
         shirakeDraw = null
         hasShirakeDraw = false
+
+        boss = Boss()
+        bossDone = false
+        bossDraw = null
 
         // フラグ・タイマーのリセット
         hitFlag = false
@@ -882,6 +925,7 @@ class World {
     }
 
     private fun updateShirake(dtMs: Long) {
+        if (debugNoShirake) return
         // 出現判定
         if (debugShirakeLoop) {
             if (!shirake.active && !shirakeDone && player.pos.floor % 10 == 0) {
@@ -988,5 +1032,155 @@ class World {
         hasShirakeDraw = false
     }
 
+
+    private fun startBoss(triggerFloor: Int) {
+        if (boss.active) return
+        boss = Boss().apply {
+            active       = true
+            side         = -1                          // まず左から
+            areaBottom   = triggerFloor + BOSS_BOTTOM_FROM_TRIGGER
+            width        = BOSS_W
+            height       = BOSS_H
+            startedAtMs  = currentTimeMs
+            timeoutAtMs  = currentTimeMs + BOSS_FORCE_FALL_MS
+            punching     = false
+            punchT       = 0f
+        }
+
+        // 中央列は通路。ボス領域の間は“開いたまま＆抽選対象外”に固定
+        for (f in boss.areaBottom .. bossTopFloor()) {
+            winAnim[f][CENTER_COL] = WindowAnim.OPEN
+            nextTick[f][CENTER_COL] = 0L
+            nextEligible[f][CENTER_COL] = Long.MAX_VALUE
+        }
+        // ★開始時に強制閉めタイマをリセット（保険）
+        lastPosChangeMs = currentTimeMs
+    }
+
+    private fun endBoss() {
+        if (!boss.active) return
+        // 中央列の固定を解除
+        for (f in boss.areaBottom .. bossTopFloor()) {
+            if (nextEligible[f][CENTER_COL] == Long.MAX_VALUE/4) {
+                nextEligible[f][CENTER_COL] = currentTimeMs
+            }
+        }
+        boss.active = false
+        bossDone = true
+        // ★終了直後にリセットして、すぐには発火しないように
+        lastPosChangeMs = currentTimeMs
+    }
+
+    private fun isClosed(cell: Cell): Boolean {
+        //if (boss.active && inBossRows(cell.floor)) {
+        //    return cell.col != CENTER_COL
+        //}
+        if (boss.active) {
+            val f = cell.floor
+            //Log.d("bossTest", "inBossRows(${f})=${inBossRows(f)}  top=${bossTopFloor()} bottom=${boss.areaBottom}")
+            if (inBossRows(f) && isVisibleFloor(f)) {
+                // ボス帯に露出している行だけサイドを閉じる。中央は常に開。
+                if (cell.col == CENTER_COL) return false
+                return true
+            }
+        }
+        return getWindowCloseProgress(cell) >= 1f
+    }
+
+    private fun updateBoss(dtMs: Long) {
+        if (!boss.active) return
+
+        // タイムアウトで強制落下
+        if (currentTimeMs >= boss.timeoutAtMs) {
+            notifyHit()              // ← GameView 側が落下シーケンスへ
+            endBoss()
+            return
+        }
+
+        // 簡易パンチ：一定周期でパンチ → 終了で反対側へ移動
+        // （好みで調整）
+        val PUNCH_PERIOD_MS = 2200L
+        val PUNCH_TIME_MS   = 450L
+        val phase = ((currentTimeMs - boss.startedAtMs) % PUNCH_PERIOD_MS).toInt()
+
+        if (phase < PUNCH_TIME_MS) {
+            boss.punching = true
+            boss.punchT = phase / PUNCH_TIME_MS.toFloat()
+
+            // ★中央列かつ “ボスのボトム+1階” のみヒット
+            val hitFloor = boss.areaBottom + 1
+            if (player.pos.col == CENTER_COL && player.pos.floor == hitFloor) {
+                notifyHit()
+                endBoss()
+                return
+            }
+        } else {
+            // パンチ終わりフレームでサイド切替
+            if (boss.punching) {
+                boss.punching = false
+                boss.punchT = 0f
+                boss.side *= -1
+            }
+        }
+
+        // シーン終了：プレイヤーが領域を抜けたら（最上段を超えたら）終了
+        val passedTop = bossTopFloor() + 1
+        if (player.pos.floor > passedTop) {
+            endBoss()
+        }
+
+        bossDraw = BossDraw(
+            active      = true,
+            side        = boss.side,
+            pose        = if (boss.punching) 1 else 0, // 0:通常,1:パンチ
+            areaBottom  = boss.areaBottom,
+            areaHeight  = boss.height
+        )
+    }
+
+    private fun bossTopFloor(): Int = boss.areaBottom + (boss.height - 1)
+    private fun inBossRows(floor: Int): Boolean =
+        boss.active && floor in boss.areaBottom .. bossTopFloor()
+
+    private fun isVisibleFloor(floor: Int): Boolean {
+        val vStart = visTopFloor
+        val vEnd   = (visTopFloor + visRows - 1).coerceAtLeast(vStart)
+        return floor in vStart..vEnd
+    }
+
+    // camTop/rows から “今 何段まで露出してよいか（0..3）” を返す
+    private fun bossRevealRows(camTop: Int, rows: Int): Int {
+        if (!boss.active) return 0
+        val topVisible = camTop + rows - 1
+        return (topVisible - boss.areaBottom + 1) // ← bottom 基準で差分+1
+            .coerceIn(0, boss.height)
+    }
+
+    data class BossView(
+        val bottom: Int, val height: Int,
+        val leftCol: Int, val width: Int,
+        val side: Int, val reveal: Int
+    )
+    fun getBossView(camTop: Int, rows: Int): BossView? {
+        if (!boss.active) return null
+        return BossView(
+            bottom = boss.areaBottom,
+            height = boss.height,
+            leftCol = bossLeftCol(),
+            width = BOSS_W,
+            side = boss.side,
+            reveal = bossRevealRows(camTop, rows)
+        )
+    }
+
+
+    private fun bossLeftCol(): Int =
+        if (boss.side < 0) 0 else Config.COLS - boss.width
+
+    private fun bossRightCol(): Int =
+        bossLeftCol() + boss.width - 1
+
+    private fun bossCols(): IntRange =
+        bossLeftCol()..bossRightCol()
 
 }
