@@ -12,7 +12,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.01"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -32,6 +32,15 @@ android {
     }
     kotlinOptions {
         jvmTarget = "11"
+    }
+}
+
+afterEvaluate {
+    val appName = android.defaultConfig.applicationId?.substringAfterLast(".") ?: "app"
+    val version = android.defaultConfig.versionName
+
+    base {
+        archivesName.set("${appName}-${version}")
     }
 }
 

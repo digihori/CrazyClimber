@@ -13,6 +13,8 @@ class World {
     @Volatile var debugNoKong: Boolean = false
     @Volatile var debugKongLoop: Boolean = false
 
+    @Volatile var stageCleared: Boolean = false
+
     private val rnd = Random(System.nanoTime())
     val player = Player()
 
@@ -137,6 +139,9 @@ class World {
     //fun getWindow(cell: Cell): WindowState =
     //    windows[cell.floor.coerceIn(0, Config.FLOORS - 1)][cell.col.coerceIn(0, Config.COLS - 1)]
 
+    private fun atTop(): Boolean = (player.pos.floor >= Config.FLOORS)
+    //private fun atTop(): Boolean = false
+
     fun update(dtMs: Long) {
         currentTimeMs += dtMs
 
@@ -167,8 +172,9 @@ class World {
         updateBoss(dtMs)
         updateOjisanAndPots(dtMs)
         // クリア条件（仮）：最上階に到達したら固定ボーナス
-        if (player.pos.floor >= Config.FLOORS - 1) {
+        if (!stageCleared && player.pos.floor >= Config.FLOORS - 1) {
             // クリア演出は後で。とりあえず何もしない
+            stageCleared = true
         }
     }
 
@@ -570,8 +576,8 @@ class World {
     }
 
     private fun handleForceCloseByIdle() {
-        // ボス出現中は無効
-        if (boss.active) {
+        // 最上階、ボス出現中は無効
+        if (atTop() || boss.active) {
             // ついでにタイマをリセットしておくと、終了直後の誤発火も防げる
             lastPosChangeMs = currentTimeMs
             return
@@ -667,7 +673,7 @@ class World {
         // === 先に「仕様の2項」を強制適用 ===
         // (A) UNSTABLE → 両手下（BOTH_DOWN）で +1階（着地＝BOTH_DOWN）
         if (wasUnstable && inputBothDown) {
-            player.stepClimbAccepted()
+            if (!atTop()) player.stepClimbAccepted()
             applyPose(PlayerPose.BOTH_DOWN)
             lastUnstable = null   // シーケンス完了
             return
@@ -675,7 +681,7 @@ class World {
 
         // (A2) STABLE 両手上（BOTH_UP） → 両手下（BOTH_DOWN）で +1階
         if (wasStable && player.hands == HandPair.BOTH_UP && inputBothDown) {
-            player.stepClimbAccepted()
+            if (!atTop()) player.stepClimbAccepted()
             applyPose(PlayerPose.BOTH_DOWN)
             return
         }
@@ -698,7 +704,7 @@ class World {
                 PlayerPose.LUP_RDOWN else PlayerPose.LDOWN_RUP
             val next = reachCellForNextStep()
             if (!isClosed(next)) {
-                player.stepClimbAccepted()
+                if (!atTop()) player.stepClimbAccepted()
                 applyPose(poseAfter)
                 lastUnstable = curDiag
             }
@@ -711,7 +717,7 @@ class World {
                 PlayerPose.LUP_RDOWN else PlayerPose.LDOWN_RUP
             val next = reachCellForNextStep()
             if (!isClosed(next)) {
-                player.stepClimbAccepted()
+                if (!atTop()) player.stepClimbAccepted()
                 applyPose(poseAfter)
                 lastUnstable = curDiag
             }
@@ -722,10 +728,16 @@ class World {
         // ここでは禁止事項（BOTH_DOWN→BOTH_UP）を再度尊重
         val next = reachCellForNextStep()
         val canReachUp = !isClosed(next)
+        //val atTopFloor = (player.pos.floor >= Config.FLOORS)
+        val forbidBothUpNow = atTop() && (player.hands == HandPair.L_UP_R_DOWN || player.hands == HandPair.L_DOWN_R_UP) && (left == LeverDir.UP && right == LeverDir.UP)
         when {
             inputBothDown -> applyPose(PlayerPose.BOTH_DOWN)
             inputBothUp   -> {
-                if (player.hands != HandPair.BOTH_DOWN) applyPose(PlayerPose.BOTH_UP)
+                // ★UNSTABLEかつ最上段では両手上げを無効化
+                if (!forbidBothUpNow && player.hands != HandPair.BOTH_DOWN) {
+                    applyPose(PlayerPose.BOTH_UP)
+                }
+                //if (player.hands != HandPair.BOTH_DOWN) applyPose(PlayerPose.BOTH_UP)
                 // 両下→両上は通さない
             }
             curDiag == UnstablePattern.LUP_RDOWN -> if (canReachUp) applyPose(PlayerPose.LUP_RDOWN)
