@@ -13,6 +13,7 @@ object Assets {
     private var drop: Bitmap? = null
     private var inited = false
     private val kong: Array<Bitmap?> = arrayOfNulls(2)
+    private val heli: Array<Bitmap?> = arrayOfNulls(2)
     //private var kong0: Bitmap? = null
     //private var kong1: Bitmap? = null
 
@@ -36,8 +37,8 @@ object Assets {
         drop    = loadIfExists(context, "drop")
         kong[0] = loadIfExists(context, "kingkong1")
         kong[1] = loadIfExists(context, "kingkong2")
-        //if (kong0 == null) kong0 = BitmapFactory.decodeResource(context.resources, R.drawable.kong_idle)
-        //if (kong1 == null) kong1 = BitmapFactory.decodeResource(context.resources, R.drawable.kong_punch)
+        heli[0] = loadIfExists(context, "heli1")
+        heli[1] = loadIfExists(context, "heli2")
         inited = true
     }
 
@@ -63,6 +64,10 @@ object Assets {
 
     fun getKongBitmap(frame: Int): Bitmap? {
         return kong[(frame and 1)]
+    }
+
+    fun getHeliBitmap(frame: Int): Bitmap? {
+        return heli[frame and 1]
     }
 
     fun release() {

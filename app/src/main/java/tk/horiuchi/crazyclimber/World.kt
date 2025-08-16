@@ -17,6 +17,7 @@ class World {
 
     private val rnd = Random(System.nanoTime())
     val player = Player()
+    var stage: Int = 1
 
     // 5xFLOORS の窓状態と次遷移時刻
     private val windows = Array(Config.FLOORS) { Array(Config.COLS) { WindowState.OPEN } }
@@ -145,37 +146,43 @@ class World {
     fun update(dtMs: Long) {
         currentTimeMs += dtMs
 
-        //triggerBossIfNeeded()
-        if (!debugNoKong) {
-            if (debugKongLoop) {
-                if (!boss.active && player.pos.floor >= 10) {
-                    startBoss(player.pos.floor)
-                }
-            } else {
-                if (!bossDone && !boss.active && player.pos.floor >= BOSS_TRIGGER_FLOOR) {
-                    startBoss(player.pos.floor)
+        if (!isClearActive()) {
+            //triggerBossIfNeeded()
+            if (!debugNoKong) {
+                if (debugKongLoop) {
+                    if (!boss.active && player.pos.floor >= 10) {
+                        startBoss(player.pos.floor)
+                    }
+                } else {
+                    if (!bossDone && !boss.active && player.pos.floor >= BOSS_TRIGGER_FLOOR) {
+                        startBoss(player.pos.floor)
+                    }
                 }
             }
-        }
 
-        if (debugWindowsNeverClose) {
-            forceOpenAllWindows()
+            if (debugWindowsNeverClose) {
+                forceOpenAllWindows()
+            } else {
+                // 窓まわり
+                seedInitialClosedIfNeeded()  // 初めて見えた階に20%閉を配る
+                handleForceCloseByIdle()
+                stepWindowAnimAndTrigger()
+                toggleSomeVisibleWindows()   // 可視20%をトグル抽選
+            }
+
+            updateShirake(dtMs)
+            updateBoss(dtMs)
+            updateOjisanAndPots(dtMs)
+            // クリア条件（仮）：最上階に到達したら固定ボーナス
+            if (!stageCleared && player.pos.floor >= Config.FLOORS - 1) {
+                // クリア演出は後で。とりあえず何もしない
+                stageCleared = true
+            }
         } else {
-            // 窓まわり
-            seedInitialClosedIfNeeded()  // 初めて見えた階に20%閉を配る
-            handleForceCloseByIdle()
-            stepWindowAnimAndTrigger()
-            toggleSomeVisibleWindows()   // 可視20%をトグル抽選
+
         }
 
-        updateShirake(dtMs)
-        updateBoss(dtMs)
-        updateOjisanAndPots(dtMs)
-        // クリア条件（仮）：最上階に到達したら固定ボーナス
-        if (!stageCleared && player.pos.floor >= Config.FLOORS - 1) {
-            // クリア演出は後で。とりあえず何もしない
-            stageCleared = true
-        }
+        updateClear(dtMs)
     }
 
     private fun forceOpenAllWindows() {
@@ -754,6 +761,8 @@ class World {
         } else {
             shiftLatch.reset()
         }
+
+        maybeStartClear(curDiag)
     }
 
     private fun tryShiftDir(dir: LeverDir) {
@@ -772,7 +781,11 @@ class World {
     }
 
     private var hitFlag = false
-    fun notifyHit() { hitFlag = true } // 既存の当たり判定で呼ぶ
+    fun notifyHit() {
+        if (isClearActive()) return
+        hitFlag = true
+    } // 既存の当たり判定で呼ぶ
+
     fun consumeHitFlag(): Boolean {
         val v = hitFlag
         hitFlag = false
@@ -832,6 +845,11 @@ class World {
         lastPosChangeMs    = currentTimeMs
         windowSafeUntilMs  = 0L
         safeUntilMs = 3000L
+
+        clear = ClearState()          // ★ 明示的にOFFへ
+        stageCleared = false
+        clearLatched = false
+        clearDoneFlag = false
     }
 
 
@@ -1194,5 +1212,200 @@ class World {
 
     private fun bossCols(): IntRange =
         bossLeftCol()..bossRightCol()
+
+    // World.kt（Shirakeのヘルパの近くでOK）
+    private fun topVisibleFloor(): Float = visTopFloor + visRows - 1f
+
+    // プレイヤー頭上（pickupY）から画面上端までの余裕に応じて 1..4 階ぶんで可変
+    private fun heliOffscreenOvershoot(): Float {
+        val pickupY = player.pos.floor + 1.0f       // 足(スキッド)を頭上に合わせる基準
+        val headroom = (topVisibleFloor() - pickupY).coerceAtLeast(0f)
+        // 余裕がある端末では大きく（最大4F）、狭い端末では最低1Fだけオフスクリーンに
+        return (1.0f + headroom * 0.75f).coerceIn(1.0f, 4.0f)
+    }
+
+    // World.kt 末尾付近に追加
+    private enum class ClearPhase { OFF, HELI_IN, LIFT, DONE }
+
+    data class HeliDraw(val xFrac: Float, val yFloor: Float, val angleDeg: Float, val side:Int)
+    private data class ClearState(
+        var phase: ClearPhase = ClearPhase.OFF,
+        var heliXFrac: Float = 1.15f,       // 画面右外から
+        var heliYFloor: Float = Config.FLOORS + 2f, // 屋上より上から
+        var side: Int = +1,                 // 右→左
+        var targetXFrac: Float = 0.5f,
+        var targetYFloor: Float = 0f,
+        var picked: Boolean = false
+    )
+    private var clear = ClearState()
+
+    fun isClearActive() = clear.phase != ClearPhase.OFF && clear.phase != ClearPhase.DONE
+    fun getHeliDraw(): HeliDraw? = when(clear.phase) {
+        ClearPhase.HELI_IN, ClearPhase.LIFT -> HeliDraw(clear.heliXFrac, clear.heliYFloor, -8f, clear.side)
+        else -> null
+    }
+
+    @Volatile private var clearLatched = false
+    @Volatile private var clearDoneFlag = false
+    //fun consumeClearDone(): Boolean {
+    //    val v = clearDoneFlag
+    //    clearDoneFlag = false
+    //    return v
+    //}
+    fun consumeClearDone(): Boolean {
+        if (clear.phase == ClearPhase.DONE) {
+            clear.phase = ClearPhase.OFF
+            val v = clearDoneFlag
+            clearDoneFlag = false
+            return v
+        }
+        return false
+    }
+
+    fun prepareNextStage(nextStage: Int) {
+        stage = nextStage
+        stageCleared = false
+        clearLatched = false
+        clearDoneFlag = false
+
+        // プレイヤーは1F中央・両手上に戻す（スコア/残機は触らない）
+        player.pos   = Cell(Config.COLS / 2, 1)
+        player.pose  = PlayerPose.BOTH_UP
+        player.hands = HandPair.BOTH_UP
+
+        // 窓/抽選/安全系 初期化
+        for (f in 0 until Config.FLOORS) for (c in 0 until Config.COLS) {
+            winAnim[f][c]  = WindowAnim.OPEN
+            nextTick[f][c] = 0L
+            nextEligible[f][c] = 0L
+        }
+        seededFloor.fill(false)
+        nextSelectMs = currentTimeMs
+        lastPosChangeMs = currentTimeMs
+        prevCellForIdle = player.pos.copy()
+        windowSafeUntilMs = 0L
+        safeUntilMs = 2000L
+
+        // オブジェクト類 & 敵
+        pots.clear()
+        ojisans.clear()
+        endShirakeNow()
+        boss = Boss()
+        bossDone = false
+        bossDraw = null
+
+        // 当たりフラグなど
+        hitFlag = false
+
+        clear = ClearState()
+
+        // ここで難易度を段ごとに少し上げたいなら倍率を調整（任意）
+        // maxActiveRatio = (0.06f + 0.01f * (stage-1)).coerceAtMost(0.12f)
+    }
+
+    // handleInput() の最後に
+    private fun maybeStartClear(curDiag: UnstablePattern?) {
+        //val onRoof = (player.pos.floor >= Config.FLOORS)
+        val isOneHandUp = (curDiag == UnstablePattern.LUP_RDOWN || curDiag == UnstablePattern.LDOWN_RUP
+                || player.pose == PlayerPose.LUP_RDOWN || player.pose == PlayerPose.LDOWN_RUP)
+        if (!clearLatched && !isClearActive() && atTop() && isOneHandUp) {
+            startClear()
+            clearLatched = true
+        }
+    }
+
+    private val HELI_X_OFFSET_FRAC = 0.1f
+    val signedOffset = if (clear.side > 0) +HELI_X_OFFSET_FRAC else -HELI_X_OFFSET_FRAC
+    // startClear() 内の初期化を修正
+    private fun startClear() {
+        ojisans.clear(); pots.clear()
+
+        val px = (player.pos.col + 0.5f) / Config.COLS.toFloat()
+        val spawnOff = 1.2f // 画面最上端より“さらに上”に 1.2 階ぶん（好みで調整）
+
+        clear = ClearState().apply {
+            phase = ClearPhase.HELI_IN
+            side = +1
+            heliXFrac = 1.15f
+            // ★ここをビル基準から「画面の空」基準へ
+            heliYFloor = screenTopFloor() + spawnOff
+
+            targetXFrac = (px + signedOffset).coerceIn(0.02f, 0.98f)
+            targetYFloor = player.pos.floor + 1.0f
+        }
+    }
+
+    fun isClearDone() = clear.phase == ClearPhase.DONE
+
+    //fun resetClearState() {
+    //    clear = ClearState()          // phase=OFF に戻す
+    //    stageCleared = false          // 念のため
+    //}
+
+    // プレイヤーがヘリに掴まっている間だけ true
+    fun isPlayerAttachedToHeli(): Boolean =
+        (clear.phase == ClearPhase.LIFT && clear.picked)
+
+    private val CLEAR_SPEED_SCALE = 0.5f  // 0.5 = だいたい半分の速さ
+
+    private fun updateClear(dtMs: Long) {
+        if (clear.phase == ClearPhase.OFF || clear.phase == ClearPhase.DONE) return
+        val dt = dtMs / 1000f
+        val k  = CLEAR_SPEED_SCALE
+
+        when (clear.phase) {
+            ClearPhase.HELI_IN -> {
+                // 斜め進入（右外→目標へ）
+                val speedX = -0.35f * k   // 画面幅/秒
+                val speedY = -0.9f  * k   // “階”/秒（上へ行くなら値を + にしているならここは + に）
+                clear.heliXFrac += speedX * dt
+                clear.heliYFloor += speedY * dt  // 上向きに減少系なら -、増加系なら + に揃えて
+
+                // 目標へ寄る（単純吸着）
+                clear.heliXFrac += (clear.targetXFrac - clear.heliXFrac) * 0.08f * k
+                clear.heliYFloor += (clear.targetYFloor - clear.heliYFloor) * 0.08f * k
+
+                // ピックアップ判定
+                val playerX = (player.pos.col + 0.5f) / Config.COLS.toFloat()
+                val pickupX = (playerX + signedOffset).coerceIn(0f, 1f)
+                val dx = kotlin.math.abs(clear.heliXFrac - pickupX)
+                val reachX = dx <= 0.18f
+                val reachY = clear.heliYFloor <= player.pos.floor + 1.0f
+                if (reachX && reachY) {
+                    clear.phase = ClearPhase.LIFT
+                    clear.picked = true
+                }
+            }
+            ClearPhase.LIFT -> {
+                // 一緒に斜め上へ
+                //val liftX = -0.12f * k
+                val liftY = 1.6f * k
+                //clear.heliXFrac += liftX * dt
+                clear.heliYFloor += liftY * dt
+
+                // 画面外（可視最上をさらに上へ）で終了
+                val offScreenMargin = 1.2f   // もう少し上で消したいなら 1.5〜2.0
+                if (clear.heliYFloor >= screenTopFloor() + offScreenMargin) {
+                    clear.phase = ClearPhase.DONE
+                    clearDoneFlag = true   // ← あなたが既に入れている完了フラグ
+                }
+            }
+            else -> {}
+        }
+    }
+
+    // World.kt（フィールド追加）
+    @Volatile private var screenRowsHint = 0
+
+    fun setScreenRowsHint(rows: Int) {
+        screenRowsHint = rows.coerceAtLeast(1)
+    }
+
+    // 画面最上端の floor（カメラ上端 + 画面に入る総行数 - 1）
+    private fun screenTopFloor(): Float {
+        val vr = if (screenRowsHint > 0) screenRowsHint else if (visRows > 0) visRows else 12
+        return visTopFloor + vr - 1f
+    }
+
 
 }
