@@ -3,11 +3,13 @@
 
     <string name="about_title">ClimberClimber</string>
     <string name="about_message">
-        This game is a parody of the 1985 hit “Crazy Climber” and has been recreated for Android smartphones.\n
-        Features\n
-        - Hogehoge\n
-        - Game pad compatible\n
-        - Sound effects included\n
+        このゲームは1980年に流行った「クレイジークライマー」をAndroidスマホ向けに再現しています。\n
+        ゲームのスペックは独自にアレンジしています。\n
+        特徴\n
+        - 画面下部にある２つのレバー操作によりプレイヤーを操作します\n
+        - おじさんやしらけどりの攻撃は両手を揃えていると踏ん張りますが、被弾すると片手状態になります\n
+        - ゲームコントローラのアナログスティックに対応しています。また十字キーとABXYボタンでも操作できます\n
+        - 効果音あり\n
     </string>
     <string name="about_ok">OK</string>
     <string name="about_hyperlink_name">Privacy Policy</string>

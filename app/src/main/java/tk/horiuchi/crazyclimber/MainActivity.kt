@@ -101,7 +101,8 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             R.id.action_about -> {
-                //gameView.pauseGame()
+                SoundManager.onPause()
+                gameView.onPauseView()
                 showAboutDialog()
                 true
             }
@@ -115,16 +116,19 @@ class MainActivity : AppCompatActivity() {
             .setMessage(getString(R.string.about_message))
             .setPositiveButton(getString(R.string.about_ok)) { dialog, _ ->
                 dialog.dismiss()
-                //gameView.resumeGame()  // ダイアログが閉じられたときにゲームを再開
+                SoundManager.onResume()
+                gameView.onResumeView()  // ダイアログが閉じられたときにゲームを再開
             }
             .setNeutralButton(getString(R.string.about_hyperlink_name)) { _, _ ->
                 val url = getString(R.string.about_hyperlink)
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                 startActivity(intent)
-                //gameView.resumeGame()
+                SoundManager.onResume()
+                gameView.onResumeView()
             }
             .setOnCancelListener {
-                //gameView.resumeGame()  // 戻るボタンなどでもゲームを再開
+                SoundManager.onResume()
+                gameView.onResumeView()  // 戻るボタンなどでもゲームを再開
             }
             .show()
     }

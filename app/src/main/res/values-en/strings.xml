@@ -3,11 +3,12 @@
 
     <string name="about_title">ClimberClimber</string>
     <string name="about_message">
-        This game is a parody of the 1985 hit “Crazy Climber” and has been recreated for Android smartphones.\n
+        This game is a parody of the 1980 hit “Crazy Climber” and has been recreated for Android smartphones.\n
         Features\n
-        - Hogehoge\n
-        - Game pad compatible\n
-        - Sound effects included\n
+        - Control the player using the two levers at the bottom of the screen.\n
+        - If holding on with both hands, the Ojisan and Shirakedori can withstand the attack, but if they are attacked, they will be left with only one hand.\n
+        - Compatible with game controller analog sticks. Can also be controlled with the directional pad and ABXY buttons.\n
+        - Sound effects included.\n
     </string>
     <string name="about_ok">OK</string>
     <string name="about_hyperlink_name">Privacy Policy</string>
