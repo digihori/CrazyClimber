@@ -336,6 +336,12 @@ class World {
     // 可視行数のフォールバック
     private fun visibleRowsSafe(): Int = if (visRows > 0) visRows else 12
 
+    // 屋上手前で出さないマージン（端末差に合わせて可変）
+    private fun ojisanRoofMarginFloors(): Int {
+        val vr = if (visRows > 0) visRows else 12  // 画面に映る行数のフォールバック
+        return (vr / 2).coerceAtLeast(3)          // 画面の上半分 ≒ 少し手前（最低3F）
+    }
+
     // 端末ごとに変わる“スポーン帯”を計算（プレイヤーの少し上〜画面上端の手前）
     private fun ojisanSpawnBand(): IntRange? {
         val rows = visibleRowsSafe()
@@ -359,6 +365,11 @@ class World {
         if (debugNoOjisan) return
         if (shirake.active) return
         if (boss.active) return
+
+        // 屋上の少し手前からは出さない
+        val roofMargin = ojisanRoofMarginFloors()
+        val roofCutoff = (Config.FLOORS - 1 - roofMargin).coerceAtLeast(0)
+        if (player.pos.floor >= roofCutoff) return
 
         val band = ojisanSpawnBand() ?: return
         val (f0, f1) = band.first to band.last
@@ -1345,6 +1356,7 @@ class World {
         pots.clear()
         ojisans.clear()
         endShirakeNow()
+        shirakeDone = false
         boss = Boss()
         bossDone = false
         bossDraw = null
