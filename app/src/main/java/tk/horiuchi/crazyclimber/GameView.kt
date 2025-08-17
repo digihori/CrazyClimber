@@ -2,12 +2,15 @@ package tk.horiuchi.crazyclimber.ui.view
 
 import android.content.Context
 import android.graphics.*
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import tk.horiuchi.crazyclimber.audio.SoundManager
 import tk.horiuchi.crazyclimber.core.*
 import tk.horiuchi.crazyclimber.ui.assets.Assets
 
@@ -72,7 +75,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
     // ====== 落下～逆スクロール演出 ======
     private var fallTimer = 0f
     private var slideOffDuration = 0.8f       // プレイヤーが画面外へ消えるまで
-    private var reverseScrollTime = 2.0f      // ビル逆スクロール時間
+    private var reverseScrollTime = 3.0f      // ビル逆スクロール時間
     private val totalFallSeqTime get() = slideOffDuration + reverseScrollTime
 
     private var playerStartTop = 0f           // 落下演出で使う：描画時のtop（上辺）
@@ -143,6 +146,10 @@ class GameView(context: Context, attrs: AttributeSet?) :
                     if (wasHit /*&& world.player.stability == Stability.UNSTABLE*/) {
                         // UNSTABLEはWorld側でpodの判定をしているのでここでは不要
                         startFallSequence()
+                        SoundManager.play(SoundManager.Sfx.AREEE)
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            SoundManager.play(SoundManager.Sfx.FALL)
+                        }, 400L)
                     }
                 }
 
@@ -342,6 +349,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
         phase = GamePhase.RESPAWN
         // 次フレームで自動的に PLAYING に入る
+        SoundManager.play(SoundManager.Sfx.PLAY_START)
         phase = GamePhase.PLAYING
     }
 
@@ -974,6 +982,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
         camTopFloor = 0
 
         phase = GamePhase.PLAYING
+        SoundManager.play(SoundManager.Sfx.PLAY_START)
     }
 
     private fun startNextStage() {
@@ -992,6 +1001,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
         camTopFloor = 0
         phase = GamePhase.PLAYING
+        SoundManager.play(SoundManager.Sfx.PLAY_START)
     }
 
 

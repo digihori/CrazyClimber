@@ -1,6 +1,9 @@
 package tk.horiuchi.crazyclimber.core
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import tk.horiuchi.crazyclimber.audio.SoundManager
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -315,6 +318,13 @@ class World {
                     }
                     lastUnstable = imposed
                 }
+                if (p.kind == Pot.Kind.POT) {
+                    // 受け木鉢が跳ね返った時だけ効果音
+                    SoundManager.play(SoundManager.Sfx.HIT)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        SoundManager.play(SoundManager.Sfx.ITE)
+                    }, 300L)
+                }
             }
             Stability.UNSTABLE -> {
                 notifyHit()
@@ -323,21 +333,41 @@ class World {
         }
     }
 
+    // 可視行数のフォールバック
+    private fun visibleRowsSafe(): Int = if (visRows > 0) visRows else 12
+
+    // 端末ごとに変わる“スポーン帯”を計算（プレイヤーの少し上〜画面上端の手前）
+    private fun ojisanSpawnBand(): IntRange? {
+        val rows = visibleRowsSafe()
+
+        // プレイヤーからどれだけ上で湧かせるか：可視行数に比例（例：30%〜65%）
+        val minAhead = max(2, kotlin.math.round(rows * 0.30f).toInt())
+        val maxAhead = max(minAhead + 1, kotlin.math.round(rows * 0.65f).toInt())
+
+        // 画面上端（屋上を超えないようにクランプ）
+        val viewTop = (visTopFloor + visRows - 1).coerceAtMost(Config.FLOORS - 1)
+
+        // スポーン下限・上限（プレイヤーより上、かつ画面上端を越えない）
+        val from = (player.pos.floor + minAhead).coerceAtMost(viewTop)
+        val to   = (player.pos.floor + maxAhead).coerceAtMost(viewTop)
+
+        return if (from <= to) (from..to) else null
+    }
+
     /** 上方の OPEN 窓から1体スポーン */
     private fun trySpawnOjisan() {
         if (debugNoOjisan) return
         if (shirake.active) return
         if (boss.active) return
 
-        val f0 = player.pos.floor + 2
-        val f1 = (player.pos.floor + 4).coerceAtMost(Config.FLOORS - 1)
-        if (f0 > f1) return
+        val band = ojisanSpawnBand() ?: return
+        val (f0, f1) = band.first to band.last
 
-        // 上に行くほど出やすい（簡易）：floor/50 をベースに
+        // 出現確率の考え方はそのまま（必要なら調整）
         val prob = (player.pos.floor + 5).coerceAtMost(50) / 50f
         if (rnd.nextFloat() > prob) return
 
-        // ランダムに列・階を選び、OPENなら出す
+        // バンド内でランダムに選ぶ（最大6トライ）
         repeat(6) {
             val f = rnd.nextInt(f0, f1 + 1)
             val c = rnd.nextInt(0, Config.COLS)
@@ -582,17 +612,26 @@ class World {
         }
     }
 
+    private var gambareDone = false
     private fun handleForceCloseByIdle() {
         // 最上階、ボス出現中は無効
         if (atTop() || boss.active) {
             // ついでにタイマをリセットしておくと、終了直後の誤発火も防げる
             lastPosChangeMs = currentTimeMs
+            gambareDone = false
             return
         }
         // 位置が変わったら記録
         if (player.pos != prevCellForIdle) {
             prevCellForIdle = player.pos.copy()
             lastPosChangeMs = currentTimeMs
+            gambareDone = false
+        }
+        if (currentTimeMs - lastPosChangeMs > FORCE_CLOSE_IDLE_MS / 2) {
+            if (!gambareDone) {
+                gambareDone = true
+                SoundManager.play(SoundManager.Sfx.GAMBARE)
+            }
         }
         if (currentTimeMs - lastPosChangeMs < FORCE_CLOSE_IDLE_MS) return
 
@@ -712,6 +751,8 @@ class World {
             val next = reachCellForNextStep()
             if (!isClosed(next)) {
                 if (!atTop()) player.stepClimbAccepted()
+                if (poseAfter == PlayerPose.LUP_RDOWN) SoundManager.play(SoundManager.Sfx.STEP_LEFT)
+                else SoundManager.play(SoundManager.Sfx.STEP_RIGHT)
                 applyPose(poseAfter)
                 lastUnstable = curDiag
             }
@@ -725,6 +766,8 @@ class World {
             val next = reachCellForNextStep()
             if (!isClosed(next)) {
                 if (!atTop()) player.stepClimbAccepted()
+                if (poseAfter == PlayerPose.LUP_RDOWN) SoundManager.play(SoundManager.Sfx.STEP_LEFT)
+                else SoundManager.play(SoundManager.Sfx.STEP_RIGHT)
                 applyPose(poseAfter)
                 lastUnstable = curDiag
             }
@@ -931,6 +974,8 @@ class World {
             dir = shirake.dir,
             flap = 0
         )
+
+        SoundManager.play(SoundManager.Sfx.SHIRAKE)
     }
 
     private fun resetShirakePassForReverse() {
@@ -1007,8 +1052,16 @@ class World {
         val yFloor    = yFloorRaw.coerceAtMost(ceiling)
 
         // フン2回
-        if (!shirake.dropped1 && progress >= shirake.drop1T) { spawnBirdDrop(xFrac, yFloor); shirake.dropped1 = true }
-        if (!shirake.dropped2 && progress >= shirake.drop2T) { spawnBirdDrop(xFrac, yFloor); shirake.dropped2 = true }
+        if (!shirake.dropped1 && progress >= shirake.drop1T) {
+            spawnBirdDrop(xFrac, yFloor)
+            shirake.dropped1 = true
+            SoundManager.play(SoundManager.Sfx.SHIRAKE_CALL)
+        }
+        if (!shirake.dropped2 && progress >= shirake.drop2T) {
+            spawnBirdDrop(xFrac, yFloor)
+            shirake.dropped2 = true
+            SoundManager.play(SoundManager.Sfx.SHIRAKE_CALL)
+        }
 
         if (debugShirakeLoop) {
             if (player.pos.floor >= shirake.startPlayerFloor + 5) {
@@ -1085,6 +1138,7 @@ class World {
         }
         // ★開始時に強制閉めタイマをリセット（保険）
         lastPosChangeMs = currentTimeMs
+        SoundManager.play(SoundManager.Sfx.BOSS)
     }
 
     private fun endBoss() {
@@ -1150,6 +1204,7 @@ class World {
                 boss.punching = false
                 boss.punchT = 0f
                 boss.side *= -1
+                SoundManager.play(SoundManager.Sfx.BOSS_PUNCH)
             }
         }
 
@@ -1311,6 +1366,7 @@ class World {
         if (!clearLatched && !isClearActive() && atTop() && isOneHandUp) {
             startClear()
             clearLatched = true
+            SoundManager.playLoop(SoundManager.Sfx.HELI_LOOP)
         }
     }
 
@@ -1374,6 +1430,11 @@ class World {
                 if (reachX && reachY) {
                     clear.phase = ClearPhase.LIFT
                     clear.picked = true
+                    SoundManager.stopLoop(SoundManager.Sfx.HELI_LOOP)
+                    SoundManager.play(SoundManager.Sfx.YOISHO)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        SoundManager.play(SoundManager.Sfx.STAGE_CLEAR)
+                    }, 300L)
                 }
             }
             ClearPhase.LIFT -> {

@@ -12,6 +12,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import tk.horiuchi.crazyclimber.R
+import tk.horiuchi.crazyclimber.audio.SoundManager
 import tk.horiuchi.crazyclimber.core.*
 import tk.horiuchi.crazyclimber.ui.view.GameView
 import tk.horiuchi.crazyclimber.ui.view.LeverView
@@ -28,6 +29,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SoundManager.init(applicationContext)
         hideSystemUI()
         supportActionBar?.title = "ClimberClimber"
         setContentView(R.layout.activity_main)
@@ -129,13 +131,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        SoundManager.onResume()
         gameView.onResumeView()
         findViewById<View>(R.id.rootLayout).requestFocus()
     }
 
     override fun onPause() {
         super.onPause()
+        SoundManager.onPause()
         gameView.onPauseView()
+    }
+
+    override fun onDestroy() {
+        SoundManager.release()
+        super.onDestroy()
     }
 
     // ---- ゲームパッド入力（アナログ＆HAT） ----
