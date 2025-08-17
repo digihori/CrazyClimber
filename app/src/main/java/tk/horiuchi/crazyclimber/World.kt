@@ -986,7 +986,7 @@ class World {
             flap = 0
         )
 
-        SoundManager.play(SoundManager.Sfx.SHIRAKE)
+        SoundManager.playJingle(SoundManager.Sfx.SHIRAKE)
     }
 
     private fun resetShirakePassForReverse() {
@@ -1089,6 +1089,7 @@ class World {
                 shirakeDone = true
                 shirakeDraw = null
                 hasShirakeDraw = false
+                SoundManager.stopJingle()
                 return
             }
         }
@@ -1149,7 +1150,7 @@ class World {
         }
         // ★開始時に強制閉めタイマをリセット（保険）
         lastPosChangeMs = currentTimeMs
-        SoundManager.play(SoundManager.Sfx.BOSS)
+        SoundManager.playJingle(SoundManager.Sfx.BOSS)
     }
 
     private fun endBoss() {
@@ -1223,6 +1224,7 @@ class World {
         val passedTop = bossTopFloor() + 1
         if (player.pos.floor > passedTop) {
             endBoss()
+            SoundManager.stopJingle()
         }
 
         bossDraw = BossDraw(
@@ -1372,6 +1374,8 @@ class World {
 
     // handleInput() の最後に
     private fun maybeStartClear(curDiag: UnstablePattern?) {
+        if (clearDoneFlag) return
+
         //val onRoof = (player.pos.floor >= Config.FLOORS)
         val isOneHandUp = (curDiag == UnstablePattern.LUP_RDOWN || curDiag == UnstablePattern.LDOWN_RUP
                 || player.pose == PlayerPose.LUP_RDOWN || player.pose == PlayerPose.LDOWN_RUP)
@@ -1403,7 +1407,7 @@ class World {
         }
     }
 
-    fun isClearDone() = clear.phase == ClearPhase.DONE
+    //fun isClearDone() = clear.phase == ClearPhase.DONE
 
     //fun resetClearState() {
     //    clear = ClearState()          // phase=OFF に戻す
@@ -1445,7 +1449,7 @@ class World {
                     SoundManager.stopLoop(SoundManager.Sfx.HELI_LOOP)
                     SoundManager.play(SoundManager.Sfx.YOISHO)
                     Handler(Looper.getMainLooper()).postDelayed({
-                        SoundManager.play(SoundManager.Sfx.STAGE_CLEAR)
+                        SoundManager.playJingle(SoundManager.Sfx.STAGE_CLEAR)
                     }, 300L)
                 }
             }

@@ -1,6 +1,8 @@
 package tk.horiuchi.crazyclimber.audio
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Resources
 import android.media.*
 import android.os.Handler
 import android.os.Looper
@@ -32,6 +34,7 @@ object SoundManager {
     }
 
     // ====== 内部状態 ======
+    private lateinit var appRes: Resources
     private var soundPool: SoundPool? = null
     private val soundId   = EnumMap<Sfx, Int>(Sfx::class.java)     // SFX -> soundId
     private val loopStream= EnumMap<Sfx, Int>(Sfx::class.java)     // ループ再生中の streamId
@@ -52,6 +55,7 @@ object SoundManager {
     // ====== 公開 API ======
     fun init(appContext: Context) {
         if (soundPool != null) return
+        appRes = appContext.applicationContext.resources
 
         soundPool = SoundPool.Builder()
             .setMaxStreams(16)
@@ -183,6 +187,9 @@ object SoundManager {
     private val fadeHandler = Handler(Looper.getMainLooper())
     private var fadeRunnable: Runnable? = null
 
+    private fun bgmVolume(): Float =
+        if (muted) 0f else (master * bgmVol).clamp()
+
     private fun applyVolumes() {
         // ループ中の SFX にのみ即時反映（単発は play() 時に適用）
         val vSfx = if (muted) 0f else (master * sfxVol).clamp()
@@ -190,8 +197,69 @@ object SoundManager {
 
         val vBgm = if (muted) 0f else (master * bgmVol).clamp()
         bgm?.setVolume(vBgm, vBgm)
+        jingle?.setVolume(vBgm, vBgm)
     }
 
     // ===== ユーティリティ =====
     private fun Float.clamp(minV: Float = 0f, maxV: Float = 1f) = max(minV, min(maxV, this))
+
+    private var jingle: MediaPlayer? = null
+    @Volatile private var jinglePlaying = false
+
+    fun playJingle(sfx: Sfx, onEnd: (() -> Unit)? = null) {
+        val res = sfx.resId ?: return
+        if (!::appRes.isInitialized) return
+
+        stopJingle() // 多重起動防止
+
+        val mp = MediaPlayer()
+        mp.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+        )
+        // RawRes のファイル記述子から直接データソース設定（Context 不要）
+        appRes.openRawResourceFd(res)?.use { afd ->
+            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+        }
+
+        mp.isLooping = false
+        val v = bgmVolume()
+        mp.setVolume(v, v)
+
+        mp.setOnCompletionListener {
+            // 正常終了でクリーンアップ
+            try { it.stop() } catch (_: Throwable) {}
+            it.release()
+            jinglePlaying = false
+            jingle = null
+            onEnd?.invoke()
+        }
+        mp.setOnErrorListener { p, _, _ ->
+            try { p.stop() } catch (_: Throwable) {}
+            p.release()
+            jinglePlaying = false
+            jingle = null
+            onEnd?.invoke()
+            true
+        }
+
+        mp.prepare()
+        mp.start()
+        jingle = mp
+        jinglePlaying = true
+    }
+
+
+    fun stopJingle() {
+        jinglePlaying = false
+        jingle?.let {
+            try { it.stop() } catch (_: Throwable) {}
+            it.release()
+        }
+        jingle = null
+    }
+
+    fun isJinglePlaying(): Boolean = jinglePlaying
 }

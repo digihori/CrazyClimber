@@ -148,7 +148,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
                         startFallSequence()
                         SoundManager.play(SoundManager.Sfx.AREEE)
                         Handler(Looper.getMainLooper()).postDelayed({
-                            SoundManager.play(SoundManager.Sfx.FALL)
+                            SoundManager.playJingle(SoundManager.Sfx.FALL)
                         }, 400L)
                     }
                 }
@@ -349,7 +349,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
         phase = GamePhase.RESPAWN
         // 次フレームで自動的に PLAYING に入る
-        SoundManager.play(SoundManager.Sfx.PLAY_START)
+        SoundManager.playJingle(SoundManager.Sfx.PLAY_START)
         phase = GamePhase.PLAYING
     }
 
@@ -982,7 +982,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
         camTopFloor = 0
 
         phase = GamePhase.PLAYING
-        SoundManager.play(SoundManager.Sfx.PLAY_START)
+        SoundManager.playJingle(SoundManager.Sfx.PLAY_START)
     }
 
     private fun startNextStage() {
@@ -1001,7 +1001,7 @@ class GameView(context: Context, attrs: AttributeSet?) :
 
         camTopFloor = 0
         phase = GamePhase.PLAYING
-        SoundManager.play(SoundManager.Sfx.PLAY_START)
+        SoundManager.playJingle(SoundManager.Sfx.PLAY_START)
     }
 
 
