@@ -135,6 +135,13 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 // 入力＆ロジック：PLAYING のときだけ動かす
                 if (phase == GamePhase.PLAYING) {
                     world.update(dtMs)
+
+                    if (world.consumeClearDone() /*world.isClearDone()*/) {
+                        //Log.d("StageClearTest", "StageClear!!!")
+                        startNextStage()
+                        continue@mainLoop
+                    }
+
                     if (!world.isClearActive()) {
                         world.handleInput(lastLeft, lastRight)
                     }
@@ -272,11 +279,6 @@ class GameView(context: Context, attrs: AttributeSet?) :
                 }
 
                 drawFrame()
-                if (world.consumeClearDone() /*world.isClearDone()*/) {
-                    //Log.d("StageClearTest", "StageClear!!!")
-                    startNextStage()
-                    continue@mainLoop
-                }
                 post {
                     onHudUpdate?.invoke(world.player.score, world.player.lives, world.player.pos.floor)
                 }

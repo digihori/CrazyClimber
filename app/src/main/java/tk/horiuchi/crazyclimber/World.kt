@@ -113,7 +113,7 @@ class World {
     private var bossDone = false
 
     private val BOSS_TRIGGER_FLOOR = 40
-    private val BOSS_FORCE_FALL_MS = 10_000L
+    private val BOSS_FORCE_FALL_MS = 15_000L
     private val BOSS_BOTTOM_FROM_TRIGGER = 7     // 30F + 7 = 37F がボトム
     private val BOSS_H = 3                       // 3x4 の“4”
     private val BOSS_W = 3                       // 3x4 の“3”
@@ -344,7 +344,7 @@ class World {
 
     // 端末ごとに変わる“スポーン帯”を計算（プレイヤーの少し上〜画面上端の手前）
     private fun ojisanSpawnBand(): IntRange? {
-        val rows = visibleRowsSafe()
+        val rows = visibleRowsSafe() - 1
 
         // プレイヤーからどれだけ上で湧かせるか：可視行数に比例（例：30%〜65%）
         val minAhead = max(2, kotlin.math.round(rows * 0.30f).toInt())
